@@ -322,7 +322,9 @@ static void agent_create_binding_response(Agent* agent, StunMessage* msg, Addres
 }
 
 static void agent_create_binding_request(Agent* agent, StunMessage* msg) {
-  uint64_t tie_breaker = 0;  // always be controlled
+  // Generate random tie-breaker (RFC 8445 requires 64-bit random value)
+  uint64_t tie_breaker = ((uint64_t)rand() << 32) | (uint64_t)rand();
+  if (tie_breaker == 0) tie_breaker = 1;  // Avoid zero value
   // send binding request
   stun_msg_create(msg, STUN_CLASS_REQUEST | STUN_METHOD_BINDING);
   char username[584];
