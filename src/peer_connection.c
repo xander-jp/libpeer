@@ -318,6 +318,8 @@ int peer_connection_loop(PeerConnection* pc) {
     case PEER_CONNECTION_COMPLETED:
       if ((pc->agent_ret = agent_recv(&pc->agent, pc->agent_buf, sizeof(pc->agent_buf))) > 0) {
         LOGD("agent_recv %d", pc->agent_ret);
+        // Update keepalive timestamp on any valid data received
+        pc->agent.binding_request_time = ports_get_epoch_time();
 
         if (rtcp_probe(pc->agent_buf, pc->agent_ret)) {
           LOGD("Got RTCP packet");
