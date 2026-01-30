@@ -1,6 +1,6 @@
 # LibPeer Unity Plugin
 
-libpeer の Unity ネイティブプラグインです。WebRTC DataChannel とメディアストリーミングを提供します。
+Unity native plugin for libpeer. Provides WebRTC DataChannel and media streaming.
 
 ## Supported Platforms
 
@@ -40,24 +40,24 @@ jp.co.mixi.libpeer/
 
 ### Unity Package Manager (Git URL)
 
-1. Window > Package Manager を開く
-2. "+" ボタン > "Add package from git URL..."
-3. 以下を入力:
+1. Open Window > Package Manager
+2. Click "+" button > "Add package from git URL..."
+3. Enter:
    ```
-   https://github.com/dsugisawa-mixi/libpeer.git?path=upm/jp.co.mixi.libpeer
+   https://github.com/anthropics/libpeer.git?path=upm/jp.co.mixi.libpeer
    ```
 
 ### Local Development
 
 ```bash
-# リポジトリをクローン
-git clone --recursive https://github.com/dsugisawa-mixi/libpeer.git
+# Clone the repository
+git clone --recursive https://github.com/anthropics/libpeer.git
 cd libpeer
 
-# 全プラットフォームをビルド
+# Build all platforms
 ./scripts/build_all.sh
 
-# Unity プロジェクトの Packages/manifest.json に追加
+# Add to your Unity project's Packages/manifest.json
 {
   "dependencies": {
     "jp.co.mixi.libpeer": "file:../../libpeer/upm/jp.co.mixi.libpeer"
@@ -93,17 +93,17 @@ export ANDROID_NDK_HOME=/path/to/ndk
 ### macOS Code Signing & Notarization
 
 ```bash
-# 署名のみ
+# Signing only
 export CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 ./scripts/build_macos.sh
 
-# 署名 + Notarization
+# Signing + Notarization
 export CODESIGN_IDENTITY="Developer ID Application: Your Name (TEAMID)"
 export NOTARIZE_PROFILE="your-profile-name"
 ./scripts/build_macos.sh
 ```
 
-Notarization プロファイルの作成:
+Creating a notarization profile:
 ```bash
 xcrun notarytool store-credentials "your-profile-name" \
   --apple-id "your@email.com" \
@@ -137,9 +137,9 @@ LibPeerNative.peer_deinit();
 
 ## Notes
 
-- **iOS**: Unity 2021.3+ では xcframework を使用。古いバージョンでは `Legacy/libpeer.a` を使用
-- **Android**: API Level 24+ が必要 (getifaddrs 依存)
-- **macOS**: Hardened Runtime 対応済み。配布時は署名 + Notarization を推奨
+- **iOS**: Unity 2021.3+ uses xcframework. For older versions, use `Legacy/libpeer.a`
+- **Android**: Requires API Level 24+ (getifaddrs dependency)
+- **macOS**: Hardened Runtime compatible. Signing + Notarization recommended for distribution
 
 ## License
 
