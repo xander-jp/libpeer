@@ -167,7 +167,7 @@
       "url": "https://packages.unity.com"
     },
     "jp.co.mixi.libpeer": {
-      "version": "file:../../../../upm/jp.co.mixi.libpeer",
+      "version": "file:../../../../../upm/jp.co.mixi.libpeer",
       "depth": 0,
       "source": "local",
       "dependencies": {}
