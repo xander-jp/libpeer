@@ -123,6 +123,22 @@ namespace Mixi.LibPeer
             out ushort sid);
 
         // ============================================================
+        // peer_signaling.h
+        // ============================================================
+
+        [DllImport(LIB, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int peer_signaling_connect(
+            [MarshalAs(UnmanagedType.LPStr)] string url,
+            [MarshalAs(UnmanagedType.LPStr)] string token,
+            IntPtr pc);
+
+        [DllImport(LIB, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern void peer_signaling_disconnect();
+
+        [DllImport(LIB, CallingConvention = CallingConvention.Cdecl)]
+        internal static extern int peer_signaling_loop();
+
+        // ============================================================
         // Callbacks (must match C function signatures)
         // ============================================================
 
