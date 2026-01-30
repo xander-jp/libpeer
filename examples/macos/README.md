@@ -1,62 +1,61 @@
 # LibPeer Unity Sample (macOS)
 
-DataChannel サンプル - `examples/generic/main.c` と同等の機能を Unity で実装
+DataChannel sample - Unity implementation equivalent to `examples/generic/main.c`
 
-## セットアップ
+## Setup
 
-### 1. Unity でプロジェクトを開く
+### 1. Open the project in Unity
 
 ```bash
-# Unity Hub からプロジェクトを開く
-# または Unity Editor で直接開く
+# Open from Unity Hub or directly with Unity Editor
 open -a Unity LibPeerSample
 ```
 
-**注意**: 初回起動時に Unity がプロジェクトを初期化します。
+**Note**: Unity will initialize the project on first launch.
 
-### 2. シーンを作成
+### 2. Create a scene
 
-1. `File > New Scene` で新しいシーンを作成
-2. `Assets/Scenes/SampleScene.unity` として保存
-3. 空の GameObject を作成 (`Create Empty`)
-4. `LibPeerSample` スクリプトをアタッチ
+1. Create a new scene with `File > New Scene`
+2. Save as `Assets/Scenes/SampleScene.unity`
+3. Create an empty GameObject (`Create Empty`)
+4. Attach the `LibPeerSample` script
 
-### 3. UI を作成 (オプション)
+### 3. Create UI (Optional)
 
-1. `GameObject > UI > Canvas` を作成
-2. 以下の UI 要素を追加:
-   - `InputField` (URL 入力用)
+1. Create `GameObject > UI > Canvas`
+2. Add the following UI elements:
+   - `InputField` (for URL input)
    - `Button` x2 (Connect / Disconnect)
    - `Text` x2 (Status / Log)
-3. `LibPeerSample` コンポーネントにドラッグ&ドロップ
+3. Drag & drop to `LibPeerSample` component
 
-## 使い方
+## Usage
 
-### SFU サーバーの起動
+### Start the SFU server
 
 ```bash
-# ローカルで SFU を起動 (ポート 8888)
+# Start SFU locally (port 8888)
 cd /path/to/sfu
 ./sfu
 
-# 別ターミナルで cloudflared tunnel を起動
+# In another terminal, start cloudflared tunnel
 cloudflared tunnel --url http://127.0.0.1:8888
-# => https://xxx-xxx-xxx.trycloudflare.com のような URL が表示される
+# => A URL like https://xxx-xxx-xxx.trycloudflare.com will be displayed
 ```
 
-### Unity で接続
+### Connect from Unity
 
-1. Unity Editor でプレイモードを開始
-2. 表示された cloudflared URL を入力フィールドにペースト
-   - 例: `https://neo-pin-dat-revised.trycloudflare.com`
-3. `Connect` ボタンをクリック
-4. 接続が確立されると自動的に1秒ごとにメッセージを送信
+1. Start Play mode in Unity Editor
+2. Set the cloudflared URL in Inspector's `Signaling Url` field
+   - Example: `https://neo-pin-dat-revised.trycloudflare.com`
+3. Right-click `LibPeerSample` component and select `Connect`
+4. Once connected, messages are sent automatically every second
 
-## 動作確認
+## Verification
 
-接続成功時のログ:
+Log output on successful connection:
 ```
-[12:34:56] Connecting to: https://xxx.trycloudflare.com
+[12:34:56] Connecting to: https://xxx.trycloudflare.com/whip/00/00/00
 [12:34:56] Signaling connected
 [12:34:57] State: checking
 [12:34:57] State: connected
@@ -66,29 +65,29 @@ cloudflared tunnel --url http://127.0.0.1:8888
 [12:34:59] Sent: datachannel message : 00001
 ```
 
-`ping` を受信すると自動的に `pong` を返します。
+When receiving `ping`, it automatically replies with `pong`.
 
-## ビルド
+## Build
 
 ```bash
-# macOS スタンドアロンビルド
+# macOS standalone build
 # Unity Editor: File > Build Settings > macOS > Build
 ```
 
-## トラブルシューティング
+## Troubleshooting
 
-### libpeer.bundle が見つからない
+### libpeer.bundle not found
 
 ```
 DllNotFoundException: peer
 ```
 
-→ UPM パッケージが正しくインポートされているか確認:
-- `Packages/manifest.json` に `jp.co.mixi.libpeer` があるか
-- `Packages/jp.co.mixi.libpeer/Plugins/macOS/libpeer.bundle` が存在するか
+Check if the UPM package is correctly imported:
+- `Packages/manifest.json` contains `jp.co.mixi.libpeer`
+- `Packages/jp.co.mixi.libpeer/Plugins/macOS/libpeer.bundle` exists
 
-### 接続できない
+### Cannot connect
 
-- cloudflared tunnel が起動しているか確認
-- SFU サーバーがポート 8888 で起動しているか確認
-- HTTPS URL が正しいか確認
+- Verify cloudflared tunnel is running
+- Verify SFU server is running on port 8888
+- Verify HTTPS URL is correct
