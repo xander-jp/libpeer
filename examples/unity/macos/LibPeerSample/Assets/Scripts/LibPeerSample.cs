@@ -325,7 +325,7 @@ public class LibPeerSample : MonoBehaviour
 
         byte[] bytes = Encoding.UTF8.GetBytes(message);
         peer_connection_datachannel_send(_peerConnection, bytes, (UIntPtr)bytes.Length);
-        Log($"Sent: {message}");
+        LogSend(message);
     }
 
     #region Callbacks
@@ -344,7 +344,7 @@ public class LibPeerSample : MonoBehaviour
         Marshal.Copy(msg, bytes, 0, length);
         string message = Encoding.UTF8.GetString(bytes);
 
-        Log($"Recv [{sid}]: {message}");
+        LogRecv(message, sid);
 
         // Reply pong to ping
         if (message.StartsWith("ping"))
@@ -369,15 +369,33 @@ public class LibPeerSample : MonoBehaviour
     {
         string logLine = $"[{DateTime.Now:HH:mm:ss}] {message}";
         Debug.Log($"[LibPeer] {message}");
+        AppendLog(logLine);
+    }
 
+    private void LogSend(string message)
+    {
+        string logLine = $"<color=white>[{DateTime.Now:HH:mm:ss}] > {message}</color>";
+        Debug.Log($"[LibPeer] Sent: {message}");
+        AppendLog(logLine);
+    }
+
+    private void LogRecv(string message, ushort sid)
+    {
+        string logLine = $"<color=#333333>[{DateTime.Now:HH:mm:ss}] < [{sid}] {message}</color>";
+        Debug.Log($"[LibPeer] Recv [{sid}]: {message}");
+        AppendLog(logLine);
+    }
+
+    private void AppendLog(string logLine)
+    {
         _logBuilder.AppendLine(logLine);
 
-        // Keep last 15 lines
+        // Keep last 30 lines
         string[] lines = _logBuilder.ToString().Split('\n');
-        if (lines.Length > 15)
+        if (lines.Length > 30)
         {
             _logBuilder.Clear();
-            for (int i = lines.Length - 15; i < lines.Length; i++)
+            for (int i = lines.Length - 30; i < lines.Length; i++)
             {
                 if (!string.IsNullOrEmpty(lines[i]))
                     _logBuilder.AppendLine(lines[i]);
