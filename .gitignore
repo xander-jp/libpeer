@@ -12,3 +12,14 @@ _build/
 # macOS
 .DS_Store
 ._*
+
+# Unity
+**/Library/
+**/Logs/
+**/Temp/
+**/obj/
+**/UserSettings/
+*.csproj
+*.sln
+*.slnx
+mono_crash.*.json
