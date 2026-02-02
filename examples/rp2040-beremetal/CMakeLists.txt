@@ -239,6 +239,15 @@ TARGET_LINK_LIBRARIES(
 
 pico_enable_stdio_usb(${PRJ} 0)
 pico_enable_stdio_uart(${PRJ} 1)
+
+# Explicit UART configuration for RP2350
+target_compile_definitions(${PRJ} PRIVATE
+    PICO_DEFAULT_UART=0
+    PICO_DEFAULT_UART_TX_PIN=0
+    PICO_DEFAULT_UART_RX_PIN=1
+    PICO_DEFAULT_UART_BAUD_RATE=115200
+)
+
 pico_add_extra_outputs(${PRJ})
 
 ADD_COMPILE_OPTIONS(

@@ -70,6 +70,14 @@ static int wifi_init(void) {
         return -1;
     }
 
+    // Quick blink to confirm cyw43 init succeeded
+    for (int i = 0; i < 3; i++) {
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+        sleep_ms(100);
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+        sleep_ms(100);
+    }
+
     cyw43_arch_enable_sta_mode();
     printf("Connecting to WiFi '%s'...\n", WIFI_SSID);
 
@@ -83,7 +91,16 @@ static int wifi_init(void) {
     }
 
     printf("WiFi connected\n");
+
+    // Blink LED to confirm board is running
+    for (int i = 0; i < 10; i++) {
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+        sleep_ms(200);
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+        sleep_ms(200);
+    }
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+
     return 0;
 }
 
