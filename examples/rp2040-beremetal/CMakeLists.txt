@@ -1,5 +1,28 @@
 CMAKE_MINIMUM_REQUIRED(VERSION 3.12)
 
+# Apply patches to third-party libraries (only once)
+set(PATCH_MARKER "${CMAKE_CURRENT_LIST_DIR}/.patches_applied")
+if(NOT EXISTS ${PATCH_MARKER})
+  message(STATUS "Applying patches to third-party libraries...")
+  execute_process(
+    COMMAND patch -p1 --forward -i ${CMAKE_CURRENT_LIST_DIR}/libsrtp.patch
+    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/../../third_party/libsrtp
+    RESULT_VARIABLE LIBSRTP_PATCH_RESULT
+  )
+  execute_process(
+    COMMAND patch -p1 --forward -i ${CMAKE_CURRENT_LIST_DIR}/mbedtls.patch
+    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/../../third_party/mbedtls
+    RESULT_VARIABLE MBEDTLS_PATCH_RESULT
+  )
+  execute_process(
+    COMMAND patch -p1 --forward -i ${CMAKE_CURRENT_LIST_DIR}/usrsctp.patch
+    WORKING_DIRECTORY ${CMAKE_CURRENT_LIST_DIR}/../../third_party/usrsctp
+    RESULT_VARIABLE USRSCTP_PATCH_RESULT
+  )
+  file(WRITE ${PATCH_MARKER} "Patches applied at ${CMAKE_CURRENT_LIST_DIR}")
+  message(STATUS "Patches applied successfully")
+endif()
+
 SET(PRJ rp2040bm)
 SET(PICO_BOARD pico_w)
 SET(HOME $ENV{HOME})
