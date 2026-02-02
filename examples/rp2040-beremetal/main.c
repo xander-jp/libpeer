@@ -3,6 +3,8 @@
 #include <stdint.h>
 
 #include "pico/stdlib.h"
+#include "hardware/uart.h"
+#include "hardware/gpio.h"
 #include "pico/cyw43_arch.h"
 #include "bsp/board.h"
 
@@ -124,11 +126,16 @@ static int webrtc_init(void) {
 int main() {
     uint32_t now;
 
+    // Explicit UART setup for RP2350 compatibility
+    uart_init(uart0, 115200);
+    gpio_set_function(0, GPIO_FUNC_UART);  // TX
+    gpio_set_function(1, GPIO_FUNC_UART);  // RX
+
     stdio_init_all();
 
-    // Wait for USB serial (optional, for debugging)
+    // Wait for serial
     sleep_ms(2000);
-    printf("\n\n=== RP2040 WebRTC Demo ===\n");
+    printf("\n\n=== RP2350 WebRTC Demo ===\n");
 
     // USB HID init
     board_init();
