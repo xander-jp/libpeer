@@ -1,0 +1,13 @@
+diff --git a/include/mbedtls/mbedtls_config.h b/include/mbedtls/mbedtls_config.h
+index 4292b493bd..738b032c03 100644
+--- a/include/mbedtls/mbedtls_config.h
++++ b/include/mbedtls/mbedtls_config.h
+@@ -1788,7 +1788,7 @@
+  *
+  * Uncomment this to enable support for use_srtp extension.
+  */
+-//#define MBEDTLS_SSL_DTLS_SRTP
++#define MBEDTLS_SSL_DTLS_SRTP
+ 
+ /**
+  * \def MBEDTLS_SSL_DTLS_CLIENT_PORT_REUSE
