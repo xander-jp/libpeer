@@ -6,11 +6,17 @@
 typedef struct UdpSocket {
   int fd;
   Address bind_addr;
+#ifdef __RP2040_BM__
+  void *priv;  // Platform-specific data
+#endif
 } UdpSocket;
 
 typedef struct TcpSocket {
   int fd;
   Address bind_addr;
+#ifdef __RP2040_BM__
+  void *priv;  // Platform-specific data
+#endif
 } TcpSocket;
 
 int udp_socket_open(UdpSocket* udp_socket, int family, int port);

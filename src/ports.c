@@ -4,6 +4,10 @@
 #include <sys/types.h>
 #include <unistd.h>
 
+#ifdef __RP2040_BM__
+#include "pico/time.h"
+#endif
+
 #include "config.h"
 
 #if CONFIG_USE_LWIP
@@ -149,7 +153,9 @@ uint32_t ports_get_epoch_time() {
 }
 
 void ports_sleep_ms(int ms) {
-#if CONFIG_USE_LWIP
+#if defined(__RP2040_BM__)
+  sleep_ms(ms);
+#elif CONFIG_USE_LWIP
   sys_msleep(ms);
 #else
   usleep(ms * 1000);

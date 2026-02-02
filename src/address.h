@@ -4,6 +4,8 @@
 #include "config.h"
 #if CONFIG_USE_LWIP
 #include <lwip/sockets.h>
+#include "lwip/inet.h" 
+#include "lwip/ip4_addr.h"
 #else
 #include <arpa/inet.h>
 #include <sys/socket.h>

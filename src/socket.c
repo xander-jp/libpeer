@@ -2,9 +2,128 @@
 #include <string.h>
 #include <unistd.h>
 
+#ifdef __RP2040_BM__
+// RP2040 bare metal - use lwIP raw API
+#include <lwip/udp.h>
+#include <lwip/tcp.h>
+#include <lwip/pbuf.h>
+#include <lwip/ip_addr.h>
+#include <lwip/igmp.h>
+#include <pico/cyw43_arch.h>
+#elif CONFIG_USE_LWIP
+#include <lwip/sockets.h>
+#include <lwip/igmp.h>
+#else
+#include <netinet/in.h>
+#endif
+
 #include "socket.h"
 #include "utils.h"
 
+#ifdef __RP2040_BM__
+// RP2040 bare metal UDP socket implementation using lwIP raw API
+
+// Receive buffer for UDP
+#define UDP_RX_BUF_SIZE 2048
+typedef struct {
+    struct udp_pcb *pcb;
+    uint8_t rx_buf[UDP_RX_BUF_SIZE];
+    int rx_len;
+    ip_addr_t rx_addr;
+    u16_t rx_port;
+    volatile int rx_ready;
+} Rp2040UdpSocket;
+
+static void udp_recv_callback(void *arg, struct udp_pcb *pcb, struct pbuf *p,
+                               const ip_addr_t *addr, u16_t port) {
+    Rp2040UdpSocket *sock = (Rp2040UdpSocket *)arg;
+    (void)pcb;
+
+    if (p != NULL && sock->rx_ready == 0) {
+        int len = p->tot_len;
+        if (len > UDP_RX_BUF_SIZE) len = UDP_RX_BUF_SIZE;
+        pbuf_copy_partial(p, sock->rx_buf, len, 0);
+        sock->rx_len = len;
+        sock->rx_addr = *addr;
+        sock->rx_port = port;
+        sock->rx_ready = 1;
+        pbuf_free(p);
+    } else if (p != NULL) {
+        pbuf_free(p);
+    }
+}
+
+// TCP receive buffer
+#define TCP_RX_BUF_SIZE 4096
+typedef struct {
+    struct tcp_pcb *pcb;
+    uint8_t rx_buf[TCP_RX_BUF_SIZE];
+    int rx_len;
+    int rx_read_pos;
+    volatile int connected;
+    volatile int error;
+} Rp2040TcpSocket;
+
+static err_t tcp_recv_callback(void *arg, struct tcp_pcb *tpcb, struct pbuf *p, err_t err) {
+    Rp2040TcpSocket *sock = (Rp2040TcpSocket *)arg;
+
+    if (err != ERR_OK || p == NULL) {
+        sock->error = 1;
+        return ERR_OK;
+    }
+
+    int space = TCP_RX_BUF_SIZE - sock->rx_len;
+    int len = p->tot_len;
+    if (len > space) len = space;
+
+    if (len > 0) {
+        pbuf_copy_partial(p, sock->rx_buf + sock->rx_len, len, 0);
+        sock->rx_len += len;
+        tcp_recved(tpcb, len);
+    }
+
+    pbuf_free(p);
+    return ERR_OK;
+}
+
+static err_t tcp_connected_callback(void *arg, struct tcp_pcb *tpcb, err_t err) {
+    Rp2040TcpSocket *sock = (Rp2040TcpSocket *)arg;
+    (void)tpcb;
+
+    if (err == ERR_OK) {
+        sock->connected = 1;
+    } else {
+        sock->error = 1;
+    }
+    return ERR_OK;
+}
+
+static void tcp_error_callback(void *arg, err_t err) {
+    Rp2040TcpSocket *sock = (Rp2040TcpSocket *)arg;
+    (void)err;
+    sock->error = 1;
+    sock->pcb = NULL;  // PCB is freed by lwIP on error
+}
+
+#endif // __RP2040_BM__
+
+#ifdef __RP2040_BM__
+int udp_socket_add_multicast_group(UdpSocket* udp_socket, Address* mcast_addr) {
+    // RP2040: Use lwIP IGMP API
+    Rp2040UdpSocket *sock = (Rp2040UdpSocket *)udp_socket->priv;
+    if (!sock || !sock->pcb) return -1;
+
+    ip4_addr_t mcast_ip;
+    mcast_ip.addr = mcast_addr->sin.sin_addr.s_addr;
+
+    err_t err = igmp_joingroup(IP4_ADDR_ANY4, &mcast_ip);
+    if (err != ERR_OK) {
+        LOGE("Failed to join multicast group: %d", err);
+        return -1;
+    }
+    return 0;
+}
+#else
 int udp_socket_add_multicast_group(UdpSocket* udp_socket, Address* mcast_addr) {
   int ret = 0;
   struct ip_mreq imreq = {0};
@@ -26,7 +145,51 @@ int udp_socket_add_multicast_group(UdpSocket* udp_socket, Address* mcast_addr) {
 
   return 0;
 }
+#endif
 
+#ifdef __RP2040_BM__
+int udp_socket_open(UdpSocket* udp_socket, int family, int port) {
+    // RP2040: Use lwIP raw UDP API
+    static Rp2040UdpSocket rp_sock;  // Static for now - single socket
+    memset(&rp_sock, 0, sizeof(rp_sock));
+
+    udp_socket->bind_addr.family = family;
+    udp_socket->priv = &rp_sock;
+
+    cyw43_arch_lwip_begin();
+
+    rp_sock.pcb = udp_new();
+    if (!rp_sock.pcb) {
+        cyw43_arch_lwip_end();
+        LOGE("Failed to create UDP PCB");
+        return -1;
+    }
+
+    err_t err;
+    if (family == AF_INET6) {
+        err = udp_bind(rp_sock.pcb, IP6_ADDR_ANY, port);
+    } else {
+        err = udp_bind(rp_sock.pcb, IP4_ADDR_ANY, port);
+    }
+
+    if (err != ERR_OK) {
+        udp_remove(rp_sock.pcb);
+        rp_sock.pcb = NULL;
+        cyw43_arch_lwip_end();
+        LOGE("Failed to bind UDP: %d", err);
+        return -1;
+    }
+
+    udp_recv(rp_sock.pcb, udp_recv_callback, &rp_sock);
+
+    // Get bound port
+    udp_socket->bind_addr.port = rp_sock.pcb->local_port;
+    udp_socket->fd = 1;  // Dummy fd to indicate socket is open
+
+    cyw43_arch_lwip_end();
+    return 0;
+}
+#else
 int udp_socket_open(UdpSocket* udp_socket, int family, int port) {
   int ret;
   int reuse = 1;
@@ -93,13 +256,73 @@ int udp_socket_open(UdpSocket* udp_socket, int family, int port) {
 
   return 0;
 }
+#endif
 
+#ifdef __RP2040_BM__
+void udp_socket_close(UdpSocket* udp_socket) {
+    Rp2040UdpSocket *sock = (Rp2040UdpSocket *)udp_socket->priv;
+    if (sock && sock->pcb) {
+        cyw43_arch_lwip_begin();
+        udp_remove(sock->pcb);
+        sock->pcb = NULL;
+        cyw43_arch_lwip_end();
+    }
+    udp_socket->fd = -1;
+    udp_socket->priv = NULL;
+}
+#else
 void udp_socket_close(UdpSocket* udp_socket) {
   if (udp_socket->fd > 0) {
     close(udp_socket->fd);
   }
 }
+#endif
 
+#ifdef __RP2040_BM__
+int udp_socket_sendto(UdpSocket* udp_socket, Address* addr, const uint8_t* buf, int len) {
+    Rp2040UdpSocket *sock = (Rp2040UdpSocket *)udp_socket->priv;
+    if (!sock || !sock->pcb) {
+        LOGE("sendto before socket init");
+        return -1;
+    }
+
+    struct pbuf *p = pbuf_alloc(PBUF_TRANSPORT, len, PBUF_RAM);
+    if (!p) {
+        LOGE("Failed to allocate pbuf");
+        return -1;
+    }
+
+    memcpy(p->payload, buf, len);
+
+    ip_addr_t dest_addr;
+    u16_t dest_port;
+
+    if (addr->family == AF_INET6) {
+        // IPv6
+        IP_SET_TYPE(&dest_addr, IPADDR_TYPE_V6);
+        memcpy(&dest_addr.u_addr.ip6.addr, &addr->sin6.sin6_addr, 16);
+        dest_port = lwip_ntohs(addr->sin6.sin6_port);
+    } else {
+        // IPv4
+        IP_SET_TYPE(&dest_addr, IPADDR_TYPE_V4);
+        dest_addr.u_addr.ip4.addr = addr->sin.sin_addr.s_addr;
+        dest_port = lwip_ntohs(addr->sin.sin_port);
+    }
+
+    cyw43_arch_lwip_begin();
+    err_t err = udp_sendto(sock->pcb, p, &dest_addr, dest_port);
+    cyw43_arch_lwip_end();
+
+    pbuf_free(p);
+
+    if (err != ERR_OK) {
+        LOGE("Failed to sendto: %d", err);
+        return -1;
+    }
+
+    return len;
+}
+#else
 int udp_socket_sendto(UdpSocket* udp_socket, Address* addr, const uint8_t* buf, int len) {
   struct sockaddr* sa;
   socklen_t sock_len;
@@ -131,7 +354,49 @@ int udp_socket_sendto(UdpSocket* udp_socket, Address* addr, const uint8_t* buf, 
 
   return ret;
 }
+#endif
 
+#ifdef __RP2040_BM__
+int udp_socket_recvfrom(UdpSocket* udp_socket, Address* addr, uint8_t* buf, int len) {
+    Rp2040UdpSocket *sock = (Rp2040UdpSocket *)udp_socket->priv;
+    if (!sock || !sock->pcb) {
+        LOGE("recvfrom before socket init");
+        return -1;
+    }
+
+    // Poll for data
+    cyw43_arch_poll();
+
+    if (!sock->rx_ready) {
+        // No data available
+        return 0;
+    }
+
+    int copy_len = sock->rx_len;
+    if (copy_len > len) copy_len = len;
+
+    memcpy(buf, sock->rx_buf, copy_len);
+
+    if (addr) {
+        if (IP_IS_V6(&sock->rx_addr)) {
+            addr->family = AF_INET6;
+            memcpy(&addr->sin6.sin6_addr, &sock->rx_addr.u_addr.ip6.addr, 16);
+            addr->sin6.sin6_port = lwip_htons(sock->rx_port);
+            addr->port = sock->rx_port;
+        } else {
+            addr->family = AF_INET;
+            addr->sin.sin_addr.s_addr = sock->rx_addr.u_addr.ip4.addr;
+            addr->sin.sin_port = lwip_htons(sock->rx_port);
+            addr->port = sock->rx_port;
+        }
+    }
+
+    sock->rx_ready = 0;
+    sock->rx_len = 0;
+
+    return copy_len;
+}
+#else
 int udp_socket_recvfrom(UdpSocket* udp_socket, Address* addr, uint8_t* buf, int len) {
   struct sockaddr_in6 sin6;
   struct sockaddr_in sin;
@@ -181,7 +446,40 @@ int udp_socket_recvfrom(UdpSocket* udp_socket, Address* addr, uint8_t* buf, int 
 
   return ret;
 }
+#endif
 
+#ifdef __RP2040_BM__
+int tcp_socket_open(TcpSocket* tcp_socket, int family) {
+    static Rp2040TcpSocket rp_sock;
+    memset(&rp_sock, 0, sizeof(rp_sock));
+
+    tcp_socket->bind_addr.family = family;
+    tcp_socket->priv = &rp_sock;
+
+    cyw43_arch_lwip_begin();
+
+    if (family == AF_INET6) {
+        rp_sock.pcb = tcp_new_ip_type(IPADDR_TYPE_V6);
+    } else {
+        rp_sock.pcb = tcp_new();
+    }
+
+    if (!rp_sock.pcb) {
+        cyw43_arch_lwip_end();
+        LOGE("Failed to create TCP PCB");
+        return -1;
+    }
+
+    tcp_arg(rp_sock.pcb, &rp_sock);
+    tcp_recv(rp_sock.pcb, tcp_recv_callback);
+    tcp_err(rp_sock.pcb, tcp_error_callback);
+
+    tcp_socket->fd = 1;  // Dummy fd
+
+    cyw43_arch_lwip_end();
+    return 0;
+}
+#else
 int tcp_socket_open(TcpSocket* tcp_socket, int family) {
   tcp_socket->bind_addr.family = family;
   switch (family) {
@@ -200,7 +498,60 @@ int tcp_socket_open(TcpSocket* tcp_socket, int family) {
   }
   return 0;
 }
+#endif
 
+#ifdef __RP2040_BM__
+int tcp_socket_connect(TcpSocket* tcp_socket, Address* addr) {
+    char addr_string[ADDRSTRLEN];
+    Rp2040TcpSocket *sock = (Rp2040TcpSocket *)tcp_socket->priv;
+
+    if (!sock || !sock->pcb) {
+        LOGE("Connect before socket init");
+        return -1;
+    }
+
+    addr_to_string(addr, addr_string, sizeof(addr_string));
+    LOGI("Connecting to server: %s:%d", addr_string, addr->port);
+
+    ip_addr_t dest_addr;
+    u16_t dest_port;
+
+    if (addr->family == AF_INET6) {
+        IP_SET_TYPE(&dest_addr, IPADDR_TYPE_V6);
+        memcpy(&dest_addr.u_addr.ip6.addr, &addr->sin6.sin6_addr, 16);
+        dest_port = lwip_ntohs(addr->sin6.sin6_port);
+    } else {
+        IP_SET_TYPE(&dest_addr, IPADDR_TYPE_V4);
+        dest_addr.u_addr.ip4.addr = addr->sin.sin_addr.s_addr;
+        dest_port = lwip_ntohs(addr->sin.sin_port);
+    }
+
+    cyw43_arch_lwip_begin();
+    err_t err = tcp_connect(sock->pcb, &dest_addr, dest_port, tcp_connected_callback);
+    cyw43_arch_lwip_end();
+
+    if (err != ERR_OK) {
+        LOGE("Failed to initiate connection: %d", err);
+        return -1;
+    }
+
+    // Wait for connection (polling)
+    int timeout = 10000;  // 10 seconds
+    while (!sock->connected && !sock->error && timeout > 0) {
+        cyw43_arch_poll();
+        sleep_ms(10);
+        timeout -= 10;
+    }
+
+    if (sock->error || !sock->connected) {
+        LOGE("Connection failed or timed out");
+        return -1;
+    }
+
+    LOGI("Server is connected");
+    return 0;
+}
+#else
 int tcp_socket_connect(TcpSocket* tcp_socket, Address* addr) {
   char addr_string[ADDRSTRLEN];
   int ret;
@@ -236,13 +587,75 @@ int tcp_socket_connect(TcpSocket* tcp_socket, Address* addr) {
   LOGI("Server is connected");
   return 0;
 }
+#endif
 
+#ifdef __RP2040_BM__
+void tcp_socket_close(TcpSocket* tcp_socket) {
+    Rp2040TcpSocket *sock = (Rp2040TcpSocket *)tcp_socket->priv;
+    if (sock && sock->pcb) {
+        cyw43_arch_lwip_begin();
+        tcp_arg(sock->pcb, NULL);
+        tcp_recv(sock->pcb, NULL);
+        tcp_err(sock->pcb, NULL);
+        tcp_close(sock->pcb);
+        sock->pcb = NULL;
+        cyw43_arch_lwip_end();
+    }
+    tcp_socket->fd = -1;
+    tcp_socket->priv = NULL;
+}
+#else
 void tcp_socket_close(TcpSocket* tcp_socket) {
   if (tcp_socket->fd > 0) {
     close(tcp_socket->fd);
   }
 }
+#endif
 
+#ifdef __RP2040_BM__
+int tcp_socket_send(TcpSocket* tcp_socket, const uint8_t* buf, int len) {
+    Rp2040TcpSocket *sock = (Rp2040TcpSocket *)tcp_socket->priv;
+
+    if (!sock || !sock->pcb) {
+        LOGE("send before socket init");
+        return -1;
+    }
+
+    if (sock->error) {
+        LOGE("Socket has error");
+        return -1;
+    }
+
+    cyw43_arch_lwip_begin();
+
+    // Check available send buffer
+    u16_t avail = tcp_sndbuf(sock->pcb);
+    if (avail == 0) {
+        cyw43_arch_lwip_end();
+        return 0;  // No space available
+    }
+
+    int to_send = len;
+    if (to_send > avail) to_send = avail;
+
+    err_t err = tcp_write(sock->pcb, buf, to_send, TCP_WRITE_FLAG_COPY);
+    if (err != ERR_OK) {
+        cyw43_arch_lwip_end();
+        LOGE("Failed to write to TCP: %d", err);
+        return -1;
+    }
+
+    err = tcp_output(sock->pcb);
+    cyw43_arch_lwip_end();
+
+    if (err != ERR_OK) {
+        LOGE("Failed to output TCP: %d", err);
+        return -1;
+    }
+
+    return to_send;
+}
+#else
 int tcp_socket_send(TcpSocket* tcp_socket, const uint8_t* buf, int len) {
   int ret;
 
@@ -258,7 +671,44 @@ int tcp_socket_send(TcpSocket* tcp_socket, const uint8_t* buf, int len) {
   }
   return ret;
 }
+#endif
 
+#ifdef __RP2040_BM__
+int tcp_socket_recv(TcpSocket* tcp_socket, uint8_t* buf, int len) {
+    Rp2040TcpSocket *sock = (Rp2040TcpSocket *)tcp_socket->priv;
+
+    if (!sock || !sock->pcb) {
+        LOGE("recv before socket init");
+        return -1;
+    }
+
+    if (sock->error) {
+        LOGE("Socket has error");
+        return -1;
+    }
+
+    // Poll for data
+    cyw43_arch_poll();
+
+    if (sock->rx_len == 0) {
+        return 0;  // No data available
+    }
+
+    int copy_len = sock->rx_len - sock->rx_read_pos;
+    if (copy_len > len) copy_len = len;
+
+    memcpy(buf, sock->rx_buf + sock->rx_read_pos, copy_len);
+    sock->rx_read_pos += copy_len;
+
+    // If all data consumed, reset buffer
+    if (sock->rx_read_pos >= sock->rx_len) {
+        sock->rx_len = 0;
+        sock->rx_read_pos = 0;
+    }
+
+    return copy_len;
+}
+#else
 int tcp_socket_recv(TcpSocket* tcp_socket, uint8_t* buf, int len) {
   int ret;
 
@@ -274,3 +724,4 @@ int tcp_socket_recv(TcpSocket* tcp_socket, uint8_t* buf, int len) {
   }
   return ret;
 }
+#endif

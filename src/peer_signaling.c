@@ -6,7 +6,9 @@
 #include <unistd.h>
 
 #include <core_http_client.h>
+#ifndef __RP2040_BM__
 #include <core_mqtt.h>
+#endif
 
 #include "base64.h"
 #include "config.h"
@@ -38,20 +40,19 @@
 #define RPC_ERROR_INTERNAL_ERROR "{\"code\":-32603,\"message\":\"Internal error\"}"
 
 typedef struct PeerSignaling {
+#ifndef __RP2040_BM__
   MQTTContext_t mqtt_ctx;
   MQTTFixedBuffer_t mqtt_fixed_buf;
-
   TransportInterface_t transport;
   NetworkContext_t net_ctx;
-
   uint8_t mqtt_buf[CONFIG_MQTT_BUFFER_SIZE];
-  uint8_t http_buf[CONFIG_HTTP_BUFFER_SIZE];
-
   char subtopic[TOPIC_MAX_LEN];
   char pubtopic[TOPIC_MAX_LEN];
-
   uint16_t packet_id;
   int id;
+#endif
+
+  uint8_t http_buf[CONFIG_HTTP_BUFFER_SIZE];
 
   int proto;    // 0: MQTT, 1: HTTP
   int use_tls;  // 0: plain, 1: TLS
@@ -67,6 +68,7 @@ typedef struct PeerSignaling {
 
 static PeerSignaling g_ps = {0};
 
+#ifndef __RP2040_BM__
 static int peer_signaling_resolve_token(const char* token, char* username, char* password) {
   char plaintext[TOKEN_MAX_LEN] = {0};
   char* colon;
@@ -87,6 +89,7 @@ static int peer_signaling_resolve_token(const char* token, char* username, char*
   LOGD("Username: %s, Password: %s", username, password);
   return 0;
 }
+#endif  // !__RP2040_BM__ (MQTT token)
 
 static int peer_signaling_resolve_url(const char* url, char* host, int* port, char* path, int* use_tls) {
   char *port_start, *path_start;
@@ -143,6 +146,7 @@ static int peer_signaling_resolve_url(const char* url, char* host, int* port, ch
   return proto;
 }
 
+#ifndef __RP2040_BM__
 static void peer_signaling_mqtt_publish(MQTTContext_t* mqtt_ctx, const char* message) {
   MQTTStatus_t status;
   MQTTPublishInfo_t pub_info;
@@ -257,6 +261,7 @@ static void peer_signaling_on_pub_event(const char* msg, size_t size) {
     cJSON_Delete(req);
   }
 }
+#endif  // !__RP2040_BM__ (MQTT functions)
 
 HTTPResponse_t peer_signaling_http_request(const TransportInterface_t* transport_interface,
                                            const char* method,
@@ -367,6 +372,7 @@ static int peer_signaling_http_post(const char* hostname, const char* path, int 
   return 0;
 }
 
+#ifndef __RP2040_BM__
 static void peer_signaling_mqtt_event_cb(MQTTContext_t* mqtt_ctx,
                                          MQTTPacketInfo_t* packet_info,
                                          MQTTDeserializedInfo_t* deserialized_info) {
@@ -490,8 +496,10 @@ static int peer_signaling_mqtt_subscribe(int subscribed) {
 
   return 0;
 }
+#endif  // !__RP2040_BM__ (MQTT event/connect/subscribe)
 
 static void peer_signaling_onicecandidate(char* description, void* userdata) {
+#ifndef __RP2040_BM__
   cJSON* res;
   char* payload;
   if (g_ps.id > 0) {
@@ -506,7 +514,9 @@ static void peer_signaling_onicecandidate(char* description, void* userdata) {
     }
     cJSON_Delete(res);
     g_ps.id = 0;
-  } else {
+  } else
+#endif  // !__RP2040_BM__
+  {
     if (strlen(g_ps.token) > 0) {
       char cred[TOKEN_MAX_LEN + 10];
       memset(cred, 0, sizeof(cred));
@@ -519,7 +529,9 @@ static void peer_signaling_onicecandidate(char* description, void* userdata) {
 }
 
 int peer_signaling_connect(const char* url, const char* token, PeerConnection* pc) {
+#ifndef __RP2040_BM__
   char* client_id;
+#endif
 
   if ((g_ps.proto = peer_signaling_resolve_url(url, g_ps.host, &g_ps.port, g_ps.path, &g_ps.use_tls)) < 0) {
     LOGE("Resolve URL failed");
@@ -532,6 +544,7 @@ int peer_signaling_connect(const char* url, const char* token, PeerConnection* p
   g_ps.pc = pc;
   peer_connection_onicecandidate(g_ps.pc, peer_signaling_onicecandidate);
 
+#ifndef __RP2040_BM__
   switch (g_ps.proto) {
     case 0: {  // MQTT
       client_id = strrchr(g_ps.path, '/');
@@ -548,11 +561,16 @@ int peer_signaling_connect(const char* url, const char* token, PeerConnection* p
     default: {
     } break;
   }
+#else
+  // RP2040_BM: HTTP only
+  peer_connection_create_offer(g_ps.pc);
+#endif
 
   return 0;
 }
 
 void peer_signaling_disconnect() {
+#ifndef __RP2040_BM__
   MQTTStatus_t status = MQTTSuccess;
 
   if (!g_ps.proto && !peer_signaling_mqtt_subscribe(0)) {
@@ -563,11 +581,14 @@ void peer_signaling_disconnect() {
 
     ssl_transport_disconnect(&g_ps.net_ctx);
   }
+#endif
   LOGI("Disconnected");
 }
 
 int peer_signaling_loop() {
+#ifndef __RP2040_BM__
   MQTT_ProcessLoop(&g_ps.mqtt_ctx);
+#endif
   return 0;
 }
 #endif  // DISABLE_PEER_SIGNALING
