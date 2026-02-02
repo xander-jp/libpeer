@@ -9,14 +9,21 @@
 #include "peer.h"
 
 //=============================================================================
-// Configuration - adjust these for your environment
+// Configuration - set via environment variables or defaults below
+// Build with: SIGNALING_URL=... WIFI_SSID=... cmake ..
 //=============================================================================
-#define WIFI_SSID       "mx-free24"
-#define WIFI_PASSWORD   "ckuv7482"
-
-// Signaling server URL and token
-#define SIGNALING_URL   "http://192.168.1.100:8080/webrtc"
+#ifndef WIFI_SSID
+#define WIFI_SSID       "your-wifi-ssid"
+#endif
+#ifndef WIFI_PASSWORD
+#define WIFI_PASSWORD   "your-wifi-password"
+#endif
+#ifndef SIGNALING_URL
+#define SIGNALING_URL   "http://localhost:8080/webrtc"
+#endif
+#ifndef SIGNALING_TOKEN
 #define SIGNALING_TOKEN ""
+#endif
 
 //=============================================================================
 // Global state
