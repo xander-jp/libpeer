@@ -1,6 +1,23 @@
+# libpeer + RP2040 Baremetal Example
 
+## Overview
 
-## install
+| Item | Description |
+|------|-------------|
+| OS | None |
+| RTOS | None |
+| pico-sdk | Yes (used as HAL) |
+
+### WebRTC Stack
+
+- ICE
+- DTLS
+- SCTP
+- DataChannel
+
+DataChannel ping-pong works on real hardware.
+
+## Install
 ```
 brew install cmake openocd libraspberrypi-dev
 brew tap ArmMbed/homebrew-formulae
