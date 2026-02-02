@@ -1,6 +1,6 @@
 #pragma once
 
-#define CFG_TUSB_MCU              OPT_MCU_RP2040
+/* CFG_TUSB_MCU is auto-detected by pico-sdk based on PICO_BOARD */
 #define CFG_TUSB_RHPORT0_MODE     (OPT_MODE_DEVICE | OPT_MODE_FULL_SPEED)
 
 #define CFG_TUD_ENDPOINT0_SIZE    64

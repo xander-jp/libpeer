@@ -5,7 +5,7 @@
 #include <limits.h>
 
 /*============================================================================
- * Memory optimizations for RP2040 (264KB RAM)
+ * Memory optimizations for RP2350 (520KB RAM)
  *============================================================================*/
 #define MBEDTLS_NO_PLATFORM_ENTROPY
 #define MBEDTLS_ENTROPY_HARDWARE_ALT
@@ -18,9 +18,9 @@
 #define MBEDTLS_AES_ROM_TABLES
 #define MBEDTLS_ECP_NIST_OPTIM
 
-/* Reduce SSL buffer sizes (default 16KB each!) */
-#define MBEDTLS_SSL_MAX_CONTENT_LEN 4096
-#define MBEDTLS_SSL_IN_CONTENT_LEN  4096
+/* SSL buffer sizes - RP2350 has enough RAM for full 16KB buffers */
+#define MBEDTLS_SSL_MAX_CONTENT_LEN 16384
+#define MBEDTLS_SSL_IN_CONTENT_LEN  16384
 #define MBEDTLS_SSL_OUT_CONTENT_LEN 4096
 
 /* Reduce MPI (bignum) window size to save RAM */
