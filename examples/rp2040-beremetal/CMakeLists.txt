@@ -35,8 +35,14 @@ SET(CMAKE_CXX_STANDARD 17)
 
 # pico_sdk_init must be called early, right after project()
 pico_sdk_init()
-SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -g -include stdint.h -include stddef.h")
-SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O0 -g -include stdint.h -include stddef.h")
+SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -O0 -g")
+SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -O0 -g")
+
+# Include stdint.h/stddef.h for C/CXX only (not for assembler)
+add_compile_options(
+  "$<$<COMPILE_LANGUAGE:C,CXX>:-includestdint.h>"
+  "$<$<COMPILE_LANGUAGE:C,CXX>:-includestddef.h>"
+)
 
 # libsrtp: use standard integer types
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DHAVE_STDINT_H -DHAVE_UINT8_T -DHAVE_UINT16_T -DHAVE_UINT32_T -DHAVE_INT32_T -DHAVE_UINT64_T")
@@ -60,7 +66,7 @@ SET(CMAKE_INCLUDE_CURRENT_DIR ON)
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__RP2040_BM__")
 SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D__RP2040_BM__")
 
-# Don't define CONFIG_USE_LWIP - use POSIX socket stubs instead
+# Use POSIX socket stubs from inc/ for bare metal (LWIP_SOCKET=0)
 # SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DCONFIG_USE_LWIP=1")
 # SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DCONFIG_USE_LWIP=1")
 

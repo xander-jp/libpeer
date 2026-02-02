@@ -36,17 +36,13 @@ struct addrinfo {
     struct addrinfo *ai_next;
 };
 
-// Stub functions - exist only for linking, never actually called
-static inline int getaddrinfo(const char *node, const char *service,
-                              const struct addrinfo *hints,
-                              struct addrinfo **res) {
-    (void)node; (void)service; (void)hints;
-    *res = NULL;
-    return EAI_FAIL;
-}
+// DNS resolution implemented in inet_compat.c using lwIP
+int getaddrinfo_impl(const char *node, const char *service,
+                     const struct addrinfo *hints,
+                     struct addrinfo **res);
+void freeaddrinfo_impl(struct addrinfo *res);
 
-static inline void freeaddrinfo(struct addrinfo *res) {
-    (void)res;
-}
+#define getaddrinfo getaddrinfo_impl
+#define freeaddrinfo freeaddrinfo_impl
 
 #endif

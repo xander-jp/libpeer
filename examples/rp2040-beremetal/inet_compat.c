@@ -1,16 +1,22 @@
 // POSIX compatibility functions for RP2040 bare metal.
 //
-// Provides inet_pton, inet_ntop, gettimeofday, localtime_r for:
+// Provides inet_pton, inet_ntop, gettimeofday, localtime_r, getaddrinfo for:
 // - libpeermx/src/address.c (IP address parsing/formatting)
+// - libpeermx/src/ports.c (DNS resolution)
 // - usrsctp internal address and time handling
 
 #include <stdint.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdio.h>
 #include <time.h>
 #include "pico/time.h"
+#include "pico/cyw43_arch.h"
+#include "lwip/dns.h"
+#include "lwip/ip_addr.h"
 #include "sys/socket.h"
 #include "sys/time.h"
+#include "netdb.h"
 
 //=============================================================================
 // inet_pton / inet_ntop - IP address conversion
@@ -114,4 +120,104 @@ int nanosleep(const struct timespec *req, struct timespec *rem) {
         sleep_us(us);
     }
     return 0;
+}
+
+//=============================================================================
+// getaddrinfo / freeaddrinfo - DNS resolution using lwIP
+//=============================================================================
+
+// DNS callback state
+static volatile int dns_done = 0;
+static ip_addr_t dns_result;
+
+static void dns_callback(const char *name, const ip_addr_t *ipaddr, void *arg) {
+    (void)name;
+    (void)arg;
+    if (ipaddr) {
+        dns_result = *ipaddr;
+    } else {
+        ip_addr_set_zero(&dns_result);
+    }
+    dns_done = 1;
+}
+
+int getaddrinfo_impl(const char *node, const char *service,
+                     const struct addrinfo *hints,
+                     struct addrinfo **res) {
+    (void)service;
+    (void)hints;
+
+    if (!node || !res) {
+        return EAI_FAIL;
+    }
+
+    // Try to parse as IP address first
+    ip_addr_t addr;
+    if (ipaddr_aton(node, &addr)) {
+        // It's already an IP address
+        struct addrinfo *ai = (struct addrinfo *)calloc(1, sizeof(struct addrinfo) + sizeof(struct sockaddr_in));
+        if (!ai) return EAI_FAIL;
+
+        struct sockaddr_in *sa = (struct sockaddr_in *)(ai + 1);
+        sa->sin_family = AF_INET;
+        sa->sin_addr.s_addr = ip_addr_get_ip4_u32(&addr);
+
+        ai->ai_family = AF_INET;
+        ai->ai_socktype = SOCK_STREAM;
+        ai->ai_addrlen = sizeof(struct sockaddr_in);
+        ai->ai_addr = (struct sockaddr *)sa;
+        ai->ai_next = NULL;
+
+        *res = ai;
+        return 0;
+    }
+
+    // DNS lookup
+    dns_done = 0;
+    ip_addr_set_zero(&dns_result);
+
+    err_t err = dns_gethostbyname(node, &dns_result, dns_callback, NULL);
+
+    if (err == ERR_OK) {
+        // Result was cached
+        dns_done = 1;
+    } else if (err == ERR_INPROGRESS) {
+        // Wait for DNS callback with timeout
+        uint32_t start = to_ms_since_boot(get_absolute_time());
+        while (!dns_done) {
+            cyw43_arch_poll();
+            sleep_ms(10);
+            if (to_ms_since_boot(get_absolute_time()) - start > 5000) {
+                // 5 second timeout
+                return EAI_FAIL;
+            }
+        }
+    } else {
+        return EAI_FAIL;
+    }
+
+    if (ip_addr_isany(&dns_result)) {
+        return EAI_NONAME;
+    }
+
+    // Allocate result
+    struct addrinfo *ai = (struct addrinfo *)calloc(1, sizeof(struct addrinfo) + sizeof(struct sockaddr_in));
+    if (!ai) return EAI_FAIL;
+
+    struct sockaddr_in *sa = (struct sockaddr_in *)(ai + 1);
+    sa->sin_family = AF_INET;
+    sa->sin_addr.s_addr = ip_addr_get_ip4_u32(&dns_result);
+
+    ai->ai_family = AF_INET;
+    ai->ai_socktype = SOCK_STREAM;
+    ai->ai_addrlen = sizeof(struct sockaddr_in);
+    ai->ai_addr = (struct sockaddr *)sa;
+    ai->ai_next = NULL;
+
+    *res = ai;
+    return 0;
+}
+
+void freeaddrinfo_impl(struct addrinfo *res) {
+    free(res);
 }
