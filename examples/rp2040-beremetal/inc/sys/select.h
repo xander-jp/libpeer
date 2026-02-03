@@ -10,8 +10,12 @@
 // giving lwIP time to process incoming packets and fire callbacks.
 
 #include <sys/time.h>
-#include <pico/cyw43_arch.h>
-#include <pico/time.h>
+#include <stdint.h>
+
+// Forward declarations to avoid header inclusion order issues
+extern void cyw43_arch_poll(void);
+extern uint64_t time_us_64(void);
+extern void sleep_us(uint64_t us);
 
 // fd_set for select() - only define if not already defined
 #ifndef FD_SETSIZE
