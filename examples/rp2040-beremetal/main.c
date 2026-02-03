@@ -36,6 +36,57 @@ static uint32_t g_dcmsg_time = 0;
 static int g_count = 0;
 
 //=============================================================================
+// LED blink state machine (non-blocking)
+//=============================================================================
+typedef struct {
+    uint32_t interval_ms;   // Blink interval
+    int remaining;          // Remaining blink count
+    uint32_t last_toggle;   // Last toggle time
+    bool led_on;            // Current LED state
+} LedBlinkState;
+
+static LedBlinkState g_led_blink = {0, 0, 0, false};
+
+// Start a blink pattern
+static void led_blink_start(uint32_t interval_ms, int count) {
+    g_led_blink.interval_ms = interval_ms;
+    g_led_blink.remaining = count * 2;  // Each blink = on + off
+    g_led_blink.last_toggle = board_millis();
+    g_led_blink.led_on = true;
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+}
+
+// Process LED blink (call from main loop)
+static void led_blink_loop(void) {
+    if (g_led_blink.remaining <= 0) return;
+
+    uint32_t now = board_millis();
+    if ((now - g_led_blink.last_toggle) >= g_led_blink.interval_ms) {
+        g_led_blink.last_toggle = now;
+        g_led_blink.remaining--;
+
+        if (g_led_blink.remaining > 0) {
+            g_led_blink.led_on = !g_led_blink.led_on;
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, g_led_blink.led_on ? 1 : 0);
+        } else {
+            // Done blinking - turn off LED
+            cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+            g_led_blink.led_on = false;
+        }
+    }
+}
+
+// TX: 100ms x 3 blinks (ピッ・ピッ・ピッ)
+static void led_blink_tx(void) {
+    led_blink_start(100, 3);
+}
+
+// RX: 20ms x 15 blinks (ピピピピピ...)
+static void led_blink_rx(void) {
+    led_blink_start(20, 15);
+}
+
+//=============================================================================
 // Callbacks
 //=============================================================================
 static void onconnectionstatechange(PeerConnectionState state, void* data) {
@@ -54,9 +105,14 @@ static void onclose(void* user_data) {
 static void onmessage(char* msg, size_t len, void* user_data, uint16_t sid) {
     printf("Message [%d]: %.*s", sid, (int)len, msg);
 
+    // RX blink: 20ms x 15 (ピピピピピ...)
+    led_blink_rx();
+
     if (len >= 4 && strncmp(msg, "ping", 4) == 0) {
         printf(" -> pong");
         peer_connection_datachannel_send(g_pc, "pong", 4);
+        // TX blink: 100ms x 3 (ピッ・ピッ・ピッ)
+        led_blink_tx();
     }
     printf("\n");
 }
@@ -195,8 +251,13 @@ int main() {
                 char msg[64];
                 snprintf(msg, sizeof(msg), "datachannel message: %05d", g_count++);
                 peer_connection_datachannel_send(g_pc, msg, strlen(msg));
+                // TX blink: 100ms x 3 (ピッ・ピッ・ピッ)
+                led_blink_tx();
             }
         }
+
+        // Process LED blink pattern
+        led_blink_loop();
 
         // Small delay to prevent busy loop
         sleep_us(100);
