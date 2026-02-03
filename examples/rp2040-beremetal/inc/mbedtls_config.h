@@ -119,7 +119,7 @@
  *============================================================================*/
 #define MBEDTLS_ERROR_C
 /* #define MBEDTLS_DEBUG_C */  /* Disabled: save RAM, enable for debugging */
-/* #define MBEDTLS_SSL_KEEP_PEER_CERTIFICATE */ /* Disabled: save ~2KB */
+#define MBEDTLS_SSL_KEEP_PEER_CERTIFICATE /* Required for DTLS fingerprint verification */
 #define __unix__
 
 #endif  // MBEDTLS_CONFIG_H

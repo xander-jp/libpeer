@@ -579,6 +579,10 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
     sconn.sconn_port = htons(sctp->local_port);
     sconn.sconn_addr = (void*)sctp;
     ret = usrsctp_bind(sock, (struct sockaddr*)&sconn, sizeof(sconn));
+    if (ret < 0) {
+      LOGE("usrsctp_bind failed: errno=%d", errno);
+      break;
+    }
 
     struct sockaddr_conn rconn;
 
@@ -589,7 +593,7 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
     ret = usrsctp_connect(sock, (struct sockaddr*)&rconn, sizeof(struct sockaddr_conn));
 
     if (ret < 0 && errno != EINPROGRESS) {
-      LOGE("connect error");
+      LOGE("connect error: errno=%d", errno);
       break;
     }
 
