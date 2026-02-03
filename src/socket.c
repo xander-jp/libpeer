@@ -23,15 +23,63 @@
 #ifdef __RP2040_BM__
 // RP2040 bare metal UDP socket implementation using lwIP raw API
 
-// Receive buffer for UDP
+// UDP receive FIFO
 #define UDP_RX_BUF_SIZE 2048
+#define UDP_FIFO_SIZE 8
+
+typedef struct {
+    uint8_t data[UDP_RX_BUF_SIZE];
+    int len;
+    ip_addr_t addr;
+    u16_t port;
+} UdpFifoItem;
+
+typedef struct {
+    UdpFifoItem items[UDP_FIFO_SIZE];
+    volatile uint16_t read_pos;
+    volatile uint16_t write_pos;
+} UdpFifo;
+
+static inline void udp_fifo_init(UdpFifo *f) {
+    f->read_pos = 0;
+    f->write_pos = 0;
+}
+
+static inline int udp_fifo_is_empty(const UdpFifo *f) {
+    return f->read_pos == f->write_pos;
+}
+
+static inline int udp_fifo_is_full(const UdpFifo *f) {
+    return ((f->write_pos + 1) % UDP_FIFO_SIZE) == f->read_pos;
+}
+
+static inline int udp_fifo_push(UdpFifo *f, const uint8_t *data, int len,
+                                 const ip_addr_t *addr, u16_t port) {
+    if (udp_fifo_is_full(f)) {
+        return 0;
+    }
+    UdpFifoItem *item = &f->items[f->write_pos];
+    if (len > UDP_RX_BUF_SIZE) len = UDP_RX_BUF_SIZE;
+    memcpy(item->data, data, len);
+    item->len = len;
+    item->addr = *addr;
+    item->port = port;
+    f->write_pos = (f->write_pos + 1) % UDP_FIFO_SIZE;
+    return 1;
+}
+
+static inline int udp_fifo_pop(UdpFifo *f, UdpFifoItem *out) {
+    if (udp_fifo_is_empty(f)) {
+        return 0;
+    }
+    *out = f->items[f->read_pos];
+    f->read_pos = (f->read_pos + 1) % UDP_FIFO_SIZE;
+    return 1;
+}
+
 typedef struct {
     struct udp_pcb *pcb;
-    uint8_t rx_buf[UDP_RX_BUF_SIZE];
-    int rx_len;
-    ip_addr_t rx_addr;
-    u16_t rx_port;
-    volatile int rx_ready;
+    UdpFifo rx_fifo;
 } Rp2040UdpSocket;
 
 static void udp_recv_callback(void *arg, struct udp_pcb *pcb, struct pbuf *p,
@@ -39,16 +87,13 @@ static void udp_recv_callback(void *arg, struct udp_pcb *pcb, struct pbuf *p,
     Rp2040UdpSocket *sock = (Rp2040UdpSocket *)arg;
     (void)pcb;
 
-    if (p != NULL && sock->rx_ready == 0) {
+    if (p != NULL) {
+        // Copy to temporary buffer then push to FIFO
+        uint8_t tmp[UDP_RX_BUF_SIZE];
         int len = p->tot_len;
         if (len > UDP_RX_BUF_SIZE) len = UDP_RX_BUF_SIZE;
-        pbuf_copy_partial(p, sock->rx_buf, len, 0);
-        sock->rx_len = len;
-        sock->rx_addr = *addr;
-        sock->rx_port = port;
-        sock->rx_ready = 1;
-        pbuf_free(p);
-    } else if (p != NULL) {
+        pbuf_copy_partial(p, tmp, len, 0);
+        udp_fifo_push(&sock->rx_fifo, tmp, len, addr, port);
         pbuf_free(p);
     }
 }
@@ -152,6 +197,7 @@ int udp_socket_open(UdpSocket* udp_socket, int family, int port) {
     // RP2040: Use lwIP raw UDP API
     static Rp2040UdpSocket rp_sock;  // Static for now - single socket
     memset(&rp_sock, 0, sizeof(rp_sock));
+    udp_fifo_init(&rp_sock.rx_fifo);
 
     udp_socket->bind_addr.family = family;
     udp_socket->priv = &rp_sock;
@@ -367,32 +413,31 @@ int udp_socket_recvfrom(UdpSocket* udp_socket, Address* addr, uint8_t* buf, int 
     // Poll for data
     cyw43_arch_poll();
 
-    if (!sock->rx_ready) {
+    // Pop from FIFO
+    UdpFifoItem item;
+    if (!udp_fifo_pop(&sock->rx_fifo, &item)) {
         // No data available
         return 0;
     }
 
-    int copy_len = sock->rx_len;
+    int copy_len = item.len;
     if (copy_len > len) copy_len = len;
 
-    memcpy(buf, sock->rx_buf, copy_len);
+    memcpy(buf, item.data, copy_len);
 
     if (addr) {
-        if (IP_IS_V6(&sock->rx_addr)) {
+        if (IP_IS_V6(&item.addr)) {
             addr->family = AF_INET6;
-            memcpy(&addr->sin6.sin6_addr, &sock->rx_addr.u_addr.ip6.addr, 16);
-            addr->sin6.sin6_port = lwip_htons(sock->rx_port);
-            addr->port = sock->rx_port;
+            memcpy(&addr->sin6.sin6_addr, &item.addr.u_addr.ip6.addr, 16);
+            addr->sin6.sin6_port = lwip_htons(item.port);
+            addr->port = item.port;
         } else {
             addr->family = AF_INET;
-            addr->sin.sin_addr.s_addr = sock->rx_addr.u_addr.ip4.addr;
-            addr->sin.sin_port = lwip_htons(sock->rx_port);
-            addr->port = sock->rx_port;
+            addr->sin.sin_addr.s_addr = item.addr.u_addr.ip4.addr;
+            addr->sin.sin_port = lwip_htons(item.port);
+            addr->port = item.port;
         }
     }
-
-    sock->rx_ready = 0;
-    sock->rx_len = 0;
 
     return copy_len;
 }
