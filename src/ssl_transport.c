@@ -6,14 +6,43 @@
 #include "mbedtls/ctr_drbg.h"
 #include "mbedtls/debug.h"
 #include "mbedtls/entropy.h"
+#include "mbedtls/net_sockets.h"
 #include "mbedtls/ssl.h"
 
+#ifdef __RP2040_BM__
+#include "pico/cyw43_arch.h"
+#else
 #include <sys/select.h>
+#endif
 #include "config.h"
 #include "ports.h"
 #include "ssl_transport.h"
 #include "utils.h"
 
+#ifdef __RP2040_BM__
+static int ssl_transport_mbedtls_recv_timeout(void* ctx, unsigned char* buf, size_t len, uint32_t timeout) {
+  int ret;
+  uint32_t elapsed = 0;
+  const uint32_t poll_interval = 10;  // ms
+
+  while (elapsed < timeout) {
+    cyw43_arch_poll();
+    ret = tcp_socket_recv((TcpSocket*)ctx, buf, len);
+    if (ret > 0) {
+      return ret;
+    }
+    if (ret < 0) {
+      return MBEDTLS_ERR_NET_RECV_FAILED;
+    }
+    // ret == 0: no data yet, keep polling
+    sleep_ms(poll_interval);
+    elapsed += poll_interval;
+  }
+
+  // Timeout - tell mbedtls to retry
+  return MBEDTLS_ERR_SSL_WANT_READ;
+}
+#else
 static int ssl_transport_mbedtls_recv_timeout(void* ctx, unsigned char* buf, size_t len, uint32_t timeout) {
   int ret;
   fd_set read_fds;
@@ -37,6 +66,7 @@ static int ssl_transport_mbedtls_recv_timeout(void* ctx, unsigned char* buf, siz
 
   return ret;
 }
+#endif
 
 static int ssl_transport_mbedlts_send(void* ctx, const uint8_t* buf, size_t len) {
   return tcp_socket_send((TcpSocket*)ctx, buf, len);
@@ -93,9 +123,12 @@ int ssl_transport_connect(NetworkContext_t* net_ctx,
 
   memset(&resolved_addr, 0, sizeof(resolved_addr));
   tcp_socket_open(&net_ctx->tcp_socket, AF_INET);
-  ports_resolve_addr(host, &resolved_addr);
+  if (ports_resolve_addr(host, &resolved_addr) < 0) {
+    LOGE("Failed to resolve host: %s", host);
+    return -1;
+  }
   addr_set_port(&resolved_addr, port);
-  if ((ret = tcp_socket_connect(&net_ctx->tcp_socket, &resolved_addr) < 0)) {
+  if ((ret = tcp_socket_connect(&net_ctx->tcp_socket, &resolved_addr)) < 0) {
     return -1;
   }
 
