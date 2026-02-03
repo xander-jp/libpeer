@@ -531,6 +531,9 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
     lopt.l_linger = 0;
     usrsctp_setsockopt(sock, SOL_SOCKET, SO_LINGER, &lopt, sizeof(lopt));
 
+    int reuse = 1;
+    usrsctp_setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
 #if 0
     struct sctp_paddrparams peer_param;
     memset(&peer_param, 0, sizeof peer_param);
