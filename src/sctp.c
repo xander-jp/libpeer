@@ -492,7 +492,13 @@ static int sctp_incoming_data_cb(struct socket* sock, union sctp_sockstore addr,
 
 void sctp_usrsctp_init() {
 #if CONFIG_USE_USRSCTP
+  LOGI("usrsctp_init: starting initialization");
   usrsctp_init(0, sctp_outgoing_data_cb, NULL);
+  LOGI("usrsctp_init: completed");
+#ifdef SCTP_DEBUG
+  usrsctp_sysctl_set_sctp_debug_on(0xffffffff);  // Enable all debug output
+  LOGI("usrsctp debug enabled (all flags)");
+#endif
 #endif
 }
 
@@ -509,30 +515,43 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
   sctp->tsn = 1234;
 #if CONFIG_USE_USRSCTP
   int ret = -1;
-  usrsctp_sysctl_set_sctp_ecn_enable(0);
-  usrsctp_register_address(sctp);
+  int opt_ret;
 
+  LOGI("SCTP: sctp_create_association start, sctp=%p", (void*)sctp);
+
+  usrsctp_sysctl_set_sctp_ecn_enable(0);
+  LOGI("SCTP: ECN disabled");
+
+  usrsctp_register_address(sctp);
+  LOGI("SCTP: address registered, sctp=%p", (void*)sctp);
+
+  LOGI("SCTP: creating socket AF_CONN=%d, SOCK_STREAM=%d, IPPROTO_SCTP=%d", AF_CONN, SOCK_STREAM, IPPROTO_SCTP);
   struct socket* sock = usrsctp_socket(AF_CONN, SOCK_STREAM, IPPROTO_SCTP,
                                        sctp_incoming_data_cb, NULL, 0, sctp);
 
   if (!sock) {
-    LOGE("usrsctp_socket failed");
+    LOGE("usrsctp_socket failed, errno=%d", errno);
     return -1;
   }
+  LOGI("SCTP: socket created, sock=%p", (void*)sock);
 
   do {
+    LOGI("SCTP: setting non-blocking mode");
     if (usrsctp_set_non_blocking(sock, 1) < 0) {
-      LOGE("usrsctp_set_non_blocking failed");
+      LOGE("usrsctp_set_non_blocking failed, errno=%d", errno);
       break;
     }
+    LOGI("SCTP: non-blocking mode set");
 
     struct linger lopt;
     lopt.l_onoff = 1;
     lopt.l_linger = 0;
-    usrsctp_setsockopt(sock, SOL_SOCKET, SO_LINGER, &lopt, sizeof(lopt));
+    opt_ret = usrsctp_setsockopt(sock, SOL_SOCKET, SO_LINGER, &lopt, sizeof(lopt));
+    LOGI("SCTP: SO_LINGER set, ret=%d, errno=%d", opt_ret, errno);
 
     int reuse = 1;
-    usrsctp_setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    opt_ret = usrsctp_setsockopt(sock, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+    LOGI("SCTP: SO_REUSEADDR set, ret=%d, errno=%d", opt_ret, errno);
 
 #if 0
     struct sctp_paddrparams peer_param;
@@ -545,10 +564,12 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
     struct sctp_assoc_value av;
     av.assoc_id = SCTP_ALL_ASSOC;
     av.assoc_value = SCTP_ENABLE_RESET_STREAM_REQ | SCTP_ENABLE_CHANGE_ASSOC_REQ;
-    usrsctp_setsockopt(sock, IPPROTO_SCTP, SCTP_ENABLE_STREAM_RESET, &av, sizeof(av));
+    opt_ret = usrsctp_setsockopt(sock, IPPROTO_SCTP, SCTP_ENABLE_STREAM_RESET, &av, sizeof(av));
+    LOGI("SCTP: SCTP_ENABLE_STREAM_RESET set, ret=%d", opt_ret);
 
     uint32_t nodelay = 1;
-    usrsctp_setsockopt(sock, IPPROTO_SCTP, SCTP_NODELAY, &nodelay, sizeof(nodelay));
+    opt_ret = usrsctp_setsockopt(sock, IPPROTO_SCTP, SCTP_NODELAY, &nodelay, sizeof(nodelay));
+    LOGI("SCTP: SCTP_NODELAY set, ret=%d", opt_ret);
 
     static uint16_t event_types[] = {
         SCTP_ASSOC_CHANGE,
@@ -569,31 +590,56 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
       event.se_type = event_types[i];
       usrsctp_setsockopt(sock, IPPROTO_SCTP, SCTP_EVENT, &event, sizeof(event));
     }
+    LOGI("SCTP: event subscriptions set");
 
     struct sctp_initmsg init_msg;
     memset(&init_msg, 0, sizeof init_msg);
     init_msg.sinit_num_ostreams = 300;
     init_msg.sinit_max_instreams = 300;
-    usrsctp_setsockopt(sock, IPPROTO_SCTP, SCTP_INITMSG, &init_msg, sizeof init_msg);
+    opt_ret = usrsctp_setsockopt(sock, IPPROTO_SCTP, SCTP_INITMSG, &init_msg, sizeof init_msg);
+    LOGI("SCTP: SCTP_INITMSG set, ret=%d", opt_ret);
 
     struct sockaddr_conn sconn;
     memset(&sconn, 0, sizeof(sconn));
+#ifdef HAVE_SCONN_LEN
+    sconn.sconn_len = sizeof(sconn);
+#endif
     sconn.sconn_family = AF_CONN;
     sconn.sconn_port = htons(sctp->local_port);
     sconn.sconn_addr = (void*)sctp;
+
+    LOGI("SCTP: bind params: family=%d, port=%d, addr=%p, sizeof(sconn)=%zu",
+         sconn.sconn_family, ntohs(sconn.sconn_port), sconn.sconn_addr, sizeof(sconn));
+    LOGI("SCTP: calling usrsctp_bind...");
+
+    // Clear errno before bind
+    errno = 0;
     ret = usrsctp_bind(sock, (struct sockaddr*)&sconn, sizeof(sconn));
+    LOGI("SCTP: usrsctp_bind returned %d, errno=%d", ret, errno);
+
     if (ret < 0) {
-      LOGE("usrsctp_bind failed: errno=%d", errno);
+      LOGE("usrsctp_bind failed: errno=%d (EINVAL=%d, EADDRINUSE=%d, EISCONN=%d)",
+           errno, EINVAL, EADDRINUSE, EISCONN);
       break;
     }
+    LOGI("SCTP: bind successful");
 
     struct sockaddr_conn rconn;
-
     memset(&rconn, 0, sizeof(struct sockaddr_conn));
+#ifdef HAVE_SCONN_LEN
+    rconn.sconn_len = sizeof(rconn);
+#endif
     rconn.sconn_family = AF_CONN;
     rconn.sconn_port = htons(sctp->remote_port);
     rconn.sconn_addr = (void*)sctp;
+
+    LOGI("SCTP: connect params: family=%d, port=%d, addr=%p",
+         rconn.sconn_family, ntohs(rconn.sconn_port), rconn.sconn_addr);
+    LOGI("SCTP: calling usrsctp_connect...");
+
+    errno = 0;
     ret = usrsctp_connect(sock, (struct sockaddr*)&rconn, sizeof(struct sockaddr_conn));
+    LOGI("SCTP: usrsctp_connect returned %d, errno=%d (EINPROGRESS=%d)", ret, errno, EINPROGRESS);
 
     if (ret < 0 && errno != EINPROGRESS) {
       LOGE("connect error: errno=%d", errno);
@@ -601,6 +647,7 @@ int sctp_create_association(Sctp* sctp, DtlsSrtp* dtls_srtp) {
     }
 
     ret = 0;
+    LOGI("SCTP: association creation successful");
 
   } while (0);
 
