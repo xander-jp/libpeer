@@ -10,12 +10,20 @@
 
 #include "config.h"
 
-#if CONFIG_USE_LWIP
+#if CONFIG_USE_LWIP || defined(__RP2040_BM__)
 #include "lwip/ip_addr.h"
-#include "lwip/netdb.h"
 #include "lwip/netif.h"
 #include "lwip/sys.h"
+#endif
+
+#if CONFIG_USE_LWIP && !defined(__RP2040_BM__)
+// Full lwIP socket mode
+#include "lwip/netdb.h"
+#elif defined(__RP2040_BM__)
+// RP2040 uses stub netdb.h from inc/
+#include <netdb.h>
 #else
+// Standard POSIX
 #include <ifaddrs.h>
 #include <net/if.h>
 #include <netdb.h>
@@ -28,9 +36,10 @@
 int ports_get_host_addr(Address* addr, const char* iface_prefix) {
   int ret = 0;
 
-#if CONFIG_USE_LWIP
+#if CONFIG_USE_LWIP || defined(__RP2040_BM__)
   struct netif* netif;
   int i;
+  (void)iface_prefix; // unused in lwIP path
   for (netif = netif_list; netif != NULL; netif = netif->next) {
     switch (addr->family) {
       case AF_INET6:

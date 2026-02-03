@@ -98,7 +98,8 @@ SET(CMAKE_INCLUDE_CURRENT_DIR ON)
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -D__RP2040_BM__")
 SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D__RP2040_BM__")
 
-# Use POSIX socket stubs from inc/ for bare metal (LWIP_SOCKET=0)
+# Note: CONFIG_USE_LWIP=1 causes header conflicts with our socket stubs
+# Instead, ports.c checks __RP2040_BM__ to use lwIP netif_list directly
 # SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DCONFIG_USE_LWIP=1")
 # SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DCONFIG_USE_LWIP=1")
 
