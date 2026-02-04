@@ -7,6 +7,8 @@
 #include "hardware/gpio.h"
 #include "pico/cyw43_arch.h"
 #include "bsp/board.h"
+#include "lwip/dns.h"
+#include "lwip/ip_addr.h"
 
 #include "peer.h"
 
@@ -170,9 +172,23 @@ static void onmessage(char* msg, size_t len, void* user_data, uint16_t sid) {
 }
 
 //=============================================================================
-// WiFi initialization
+// WiFi timing variables
+//=============================================================================
+static uint32_t g_time_wifi_scan_start = 0;
+static uint32_t g_time_wifi_auth_start = 0;
+static uint32_t g_time_wifi_auth_done = 0;
+static uint32_t g_time_dhcp_start = 0;
+static uint32_t g_time_dhcp_done = 0;
+
+//=============================================================================
+// WiFi initialization (detailed timing)
 //=============================================================================
 static int wifi_init(void) {
+    int last_status = CYW43_LINK_DOWN;
+    int status;
+    uint32_t now;
+    uint32_t timeout_start;
+
     if (cyw43_arch_init()) {
         printf("WiFi init failed\n");
         return -1;
@@ -188,34 +204,129 @@ static int wifi_init(void) {
 
     cyw43_arch_enable_sta_mode();
 
+    // Start async WiFi connection
     g_time_wifi_start = board_millis();
-    printf("[TIMING] WiFi connection start: %lu ms\n", (unsigned long)g_time_wifi_start);
+    g_time_wifi_scan_start = g_time_wifi_start;
+    printf("[TIMING] WiFi scan start: %lu ms\n", (unsigned long)g_time_wifi_scan_start);
     printf("Connecting to WiFi '%s'...\n", WIFI_SSID);
 
-    if (cyw43_arch_wifi_connect_timeout_ms(
-            WIFI_SSID,
-            WIFI_PASSWORD,
-            CYW43_AUTH_WPA2_AES_PSK,
-            30000)) {
-        printf("WiFi connection failed\n");
+    if (cyw43_arch_wifi_connect_async(WIFI_SSID, WIFI_PASSWORD, CYW43_AUTH_WPA2_AES_PSK) != 0) {
+        printf("WiFi connect_async failed\n");
         return -1;
     }
 
-    g_time_wifi_done = board_millis();
-    printf("[TIMING] WiFi connected: %lu ms (took %lu ms)\n",
-           (unsigned long)g_time_wifi_done,
-           (unsigned long)(g_time_wifi_done - g_time_wifi_start));
+    // Poll for connection status with detailed timing
+    timeout_start = board_millis();
+    while (1) {
+        cyw43_arch_poll();
+        sleep_ms(10);
 
-    // Blink LED to confirm board is running
-    for (int i = 0; i < 10; i++) {
+        now = board_millis();
+        if ((now - timeout_start) > 30000) {
+            printf("WiFi connection timeout\n");
+            return -1;
+        }
+
+        status = cyw43_tcpip_link_status(&cyw43_state, CYW43_ITF_STA);
+
+        // Detect state transitions
+        if (status != last_status) {
+            switch (status) {
+                case CYW43_LINK_JOIN:
+                    // Auth/Assoc completed (scan also done at this point)
+                    g_time_wifi_auth_done = now;
+                    printf("[TIMING] WiFi scan done: %lu ms (took %lu ms)\n",
+                           (unsigned long)now, (unsigned long)(now - g_time_wifi_scan_start));
+                    printf("[TIMING] WiFi auth/assoc done: %lu ms\n", (unsigned long)now);
+                    break;
+
+                case CYW43_LINK_NOIP:
+                    // Link up, waiting for DHCP
+                    g_time_dhcp_start = now;
+                    printf("[TIMING] DHCP start: %lu ms\n", (unsigned long)now);
+                    break;
+
+                case CYW43_LINK_UP:
+                    // DHCP completed, got IP
+                    g_time_dhcp_done = now;
+                    g_time_wifi_done = now;
+                    printf("[TIMING] DHCP bound: %lu ms (took %lu ms)\n",
+                           (unsigned long)now, (unsigned long)(now - g_time_dhcp_start));
+                    printf("[TIMING] WiFi fully connected: %lu ms (total %lu ms)\n",
+                           (unsigned long)now, (unsigned long)(now - g_time_wifi_start));
+                    goto wifi_connected;
+
+                case CYW43_LINK_FAIL:
+                    printf("WiFi connection failed\n");
+                    return -1;
+
+                case CYW43_LINK_NONET:
+                    printf("WiFi: No matching SSID found\n");
+                    return -1;
+
+                case CYW43_LINK_BADAUTH:
+                    printf("WiFi: Authentication failure\n");
+                    return -1;
+
+                default:
+                    break;
+            }
+            last_status = status;
+        }
+    }
+
+wifi_connected:
+    // Blink LED to confirm WiFi connected
+    for (int i = 0; i < 5; i++) {
         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
-        sleep_ms(200);
+        sleep_ms(100);
         cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-        sleep_ms(200);
+        sleep_ms(100);
     }
     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
 
     return 0;
+}
+
+//=============================================================================
+// DNS resolution timing
+//=============================================================================
+static uint32_t g_time_dns_start = 0;
+static uint32_t g_time_dns_done = 0;
+static volatile bool g_dns_done = false;
+static ip_addr_t g_dns_result;
+
+static void dns_callback(const char *name, const ip_addr_t *ipaddr, void *arg) {
+    g_time_dns_done = board_millis();
+    if (ipaddr) {
+        g_dns_result = *ipaddr;
+        printf("[TIMING] DNS resolved: %lu ms (took %lu ms) -> %s\n",
+               (unsigned long)g_time_dns_done,
+               (unsigned long)(g_time_dns_done - g_time_dns_start),
+               ipaddr_ntoa(ipaddr));
+    } else {
+        printf("[TIMING] DNS resolution failed: %lu ms\n", (unsigned long)g_time_dns_done);
+    }
+    g_dns_done = true;
+}
+
+// Extract hostname from URL (e.g., "http://example.com:8080/path" -> "example.com")
+static void extract_hostname(const char *url, char *hostname, size_t hostname_size) {
+    const char *start = url;
+    const char *end;
+
+    // Skip protocol
+    if (strncmp(url, "http://", 7) == 0) start = url + 7;
+    else if (strncmp(url, "https://", 8) == 0) start = url + 8;
+
+    // Find end of hostname (port or path)
+    end = start;
+    while (*end && *end != ':' && *end != '/') end++;
+
+    size_t len = end - start;
+    if (len >= hostname_size) len = hostname_size - 1;
+    memcpy(hostname, start, len);
+    hostname[len] = '\0';
 }
 
 //=============================================================================
@@ -242,6 +353,34 @@ static int webrtc_init(void) {
 
     peer_connection_oniceconnectionstatechange(g_pc, onconnectionstatechange);
     peer_connection_ondatachannel(g_pc, onmessage, onopen, onclose);
+
+    // DNS resolution test for signaling server
+    char hostname[128];
+    extract_hostname(SIGNALING_URL, hostname, sizeof(hostname));
+
+    g_time_dns_start = board_millis();
+    printf("[TIMING] DNS lookup start: %lu ms (host: %s)\n", (unsigned long)g_time_dns_start, hostname);
+
+    g_dns_done = false;
+    err_t err = dns_gethostbyname(hostname, &g_dns_result, dns_callback, NULL);
+    if (err == ERR_OK) {
+        // Already cached
+        g_time_dns_done = board_millis();
+        printf("[TIMING] DNS resolved (cached): %lu ms -> %s\n",
+               (unsigned long)g_time_dns_done, ipaddr_ntoa(&g_dns_result));
+    } else if (err == ERR_INPROGRESS) {
+        // Wait for DNS callback
+        uint32_t dns_timeout = board_millis();
+        while (!g_dns_done && (board_millis() - dns_timeout) < 10000) {
+            cyw43_arch_poll();
+            sleep_ms(10);
+        }
+        if (!g_dns_done) {
+            printf("[TIMING] DNS timeout\n");
+        }
+    } else {
+        printf("[TIMING] DNS lookup failed: err=%d\n", err);
+    }
 
     g_time_signaling_start = board_millis();
     printf("[TIMING] Signaling server connect start: %lu ms\n", (unsigned long)g_time_signaling_start);
