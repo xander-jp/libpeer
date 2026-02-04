@@ -36,6 +36,24 @@ static uint32_t g_dcmsg_time = 0;
 static int g_count = 0;
 
 //=============================================================================
+// Timing measurement
+//=============================================================================
+static uint32_t g_time_boot = 0;           // Boot time (reference)
+static uint32_t g_time_wifi_start = 0;     // WiFi connection start
+static uint32_t g_time_wifi_done = 0;      // WiFi connected
+static uint32_t g_time_signaling_start = 0;// Signaling server connect start
+static uint32_t g_time_ice_checking = 0;   // ICE checking started
+static uint32_t g_time_ice_connected = 0;  // ICE connected (DTLS starts)
+static uint32_t g_time_ice_completed = 0;  // ICE completed
+static uint32_t g_time_datachannel_open = 0; // DataChannel opened (SCTP ready)
+static uint32_t g_time_first_rx = 0;       // First message received
+static uint32_t g_time_first_tx = 0;       // First message sent
+static bool g_first_rx_logged = false;
+static bool g_first_tx_logged = false;
+
+#define LOG_TIMING(label) printf("[TIMING] %s: %lu ms\n", (label), (unsigned long)board_millis())
+
+//=============================================================================
 // LED blink state machine (non-blocking)
 //=============================================================================
 typedef struct {
@@ -90,12 +108,37 @@ static void led_blink_rx(void) {
 // Callbacks
 //=============================================================================
 static void onconnectionstatechange(PeerConnectionState state, void* data) {
-    printf("State changed: %s\n", peer_connection_state_to_string(state));
+    uint32_t now = board_millis();
+    printf("[TIMING] State -> %s: %lu ms\n", peer_connection_state_to_string(state), (unsigned long)now);
+
+    switch (state) {
+        case PEER_CONNECTION_CHECKING:
+            g_time_ice_checking = now;
+            printf("[TIMING] ICE checking started: %lu ms (WiFi+%lu ms)\n",
+                   (unsigned long)now, (unsigned long)(now - g_time_wifi_done));
+            break;
+        case PEER_CONNECTION_CONNECTED:
+            g_time_ice_connected = now;
+            printf("[TIMING] ICE connected (DTLS starting): %lu ms (ICE took %lu ms)\n",
+                   (unsigned long)now, (unsigned long)(now - g_time_ice_checking));
+            break;
+        case PEER_CONNECTION_COMPLETED:
+            g_time_ice_completed = now;
+            printf("[TIMING] ICE completed: %lu ms\n", (unsigned long)now);
+            break;
+        default:
+            break;
+    }
     g_state = state;
 }
 
 static void onopen(void* user_data) {
-    printf("DataChannel opened\n");
+    g_time_datachannel_open = board_millis();
+    printf("[TIMING] DataChannel opened (SCTP ready): %lu ms\n", (unsigned long)g_time_datachannel_open);
+    printf("[TIMING] DTLS+SCTP took: %lu ms (from ICE connected)\n",
+           (unsigned long)(g_time_datachannel_open - g_time_ice_connected));
+    printf("[TIMING] Total connection time: %lu ms (from boot)\n",
+           (unsigned long)g_time_datachannel_open);
 }
 
 static void onclose(void* user_data) {
@@ -103,6 +146,15 @@ static void onclose(void* user_data) {
 }
 
 static void onmessage(char* msg, size_t len, void* user_data, uint16_t sid) {
+    // Log first RX timing
+    if (!g_first_rx_logged) {
+        g_time_first_rx = board_millis();
+        g_first_rx_logged = true;
+        printf("[TIMING] First message RX: %lu ms (from boot)\n", (unsigned long)g_time_first_rx);
+        printf("[TIMING] Time from DataChannel open to first RX: %lu ms\n",
+               (unsigned long)(g_time_first_rx - g_time_datachannel_open));
+    }
+
     printf("Message [%d]: %.*s", sid, (int)len, msg);
 
     // RX blink: 20ms x 15 (ピピピピピ...)
@@ -135,6 +187,9 @@ static int wifi_init(void) {
     }
 
     cyw43_arch_enable_sta_mode();
+
+    g_time_wifi_start = board_millis();
+    printf("[TIMING] WiFi connection start: %lu ms\n", (unsigned long)g_time_wifi_start);
     printf("Connecting to WiFi '%s'...\n", WIFI_SSID);
 
     if (cyw43_arch_wifi_connect_timeout_ms(
@@ -146,7 +201,10 @@ static int wifi_init(void) {
         return -1;
     }
 
-    printf("WiFi connected\n");
+    g_time_wifi_done = board_millis();
+    printf("[TIMING] WiFi connected: %lu ms (took %lu ms)\n",
+           (unsigned long)g_time_wifi_done,
+           (unsigned long)(g_time_wifi_done - g_time_wifi_start));
 
     // Blink LED to confirm board is running
     for (int i = 0; i < 10; i++) {
@@ -185,6 +243,8 @@ static int webrtc_init(void) {
     peer_connection_oniceconnectionstatechange(g_pc, onconnectionstatechange);
     peer_connection_ondatachannel(g_pc, onmessage, onopen, onclose);
 
+    g_time_signaling_start = board_millis();
+    printf("[TIMING] Signaling server connect start: %lu ms\n", (unsigned long)g_time_signaling_start);
     printf("Connecting to signaling server: %s\n", SIGNALING_URL);
     peer_signaling_connect(SIGNALING_URL,
                            SIGNALING_TOKEN[0] ? SIGNALING_TOKEN : NULL,
@@ -208,7 +268,9 @@ int main() {
 
     // Wait for serial
     sleep_ms(2000);
+    g_time_boot = board_millis();
     printf("\n\n=== RP2350 WebRTC Demo ===\n");
+    printf("[TIMING] Boot complete: %lu ms\n", (unsigned long)g_time_boot);
 
     // USB HID init
     board_init();
@@ -251,6 +313,16 @@ int main() {
                 char msg[64];
                 snprintf(msg, sizeof(msg), "datachannel message: %05d", g_count++);
                 peer_connection_datachannel_send(g_pc, msg, strlen(msg));
+
+                // Log first TX timing
+                if (!g_first_tx_logged) {
+                    g_time_first_tx = board_millis();
+                    g_first_tx_logged = true;
+                    printf("[TIMING] First message TX: %lu ms (from boot)\n", (unsigned long)g_time_first_tx);
+                    printf("[TIMING] Time from DataChannel open to first TX: %lu ms\n",
+                           (unsigned long)(g_time_first_tx - g_time_datachannel_open));
+                }
+
                 // TX blink: 100ms x 3 (ピッ・ピッ・ピッ)
                 led_blink_tx();
             }

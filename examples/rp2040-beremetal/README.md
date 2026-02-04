@@ -31,7 +31,7 @@ mkdir -p ./_build
 cd ./_build
 cmake ..
 make
-openocd -f interface/cmsis-dap.cfg -f target/rp2040.cfg -c "program rp2040bm.elf verify reset exit"
+sudo openocd -f interface/raspberrypi-swd.cfg -f target/rp2350.cfg -c "program rp2350bm.elf verify reset exit"
 ```
 
 ## Patches
