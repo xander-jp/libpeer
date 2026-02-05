@@ -194,13 +194,13 @@ static int wifi_init(void) {
         return -1;
     }
 
-    // Quick blink to confirm cyw43 init succeeded
-    for (int i = 0; i < 3; i++) {
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
-        sleep_ms(100);
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-        sleep_ms(100);
-    }
+    // Quick blink to confirm cyw43 init succeeded (disabled for timing measurement)
+    // for (int i = 0; i < 3; i++) {
+    //     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+    //     sleep_ms(100);
+    //     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+    //     sleep_ms(100);
+    // }
 
     cyw43_arch_enable_sta_mode();
 
@@ -276,14 +276,14 @@ static int wifi_init(void) {
     }
 
 wifi_connected:
-    // Blink LED to confirm WiFi connected
-    for (int i = 0; i < 5; i++) {
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
-        sleep_ms(100);
-        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-        sleep_ms(100);
-    }
-    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+    // Blink LED to confirm WiFi connected (disabled for timing measurement)
+    // for (int i = 0; i < 5; i++) {
+    //     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+    //     sleep_ms(100);
+    //     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+    //     sleep_ms(100);
+    // }
+    // cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
 
     return 0;
 }
