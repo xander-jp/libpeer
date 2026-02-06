@@ -185,7 +185,7 @@ uint8_t const desc_configuration_b[] = {
     0x01,                       // bConfigurationValue
     0x00,                       // iConfiguration
     TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP, // bmAttributes (Bus powered + Remote Wakeup Available)
-    100,                        // bMaxPower (2mA units) -> 100 = 200mA
+    250,                        // bMaxPower (2mA units) -> 250 = 500mA
 
     // ----- Interface Descriptor (HID Boot Mouse) -----
     0x09,                       // bLength
@@ -391,8 +391,11 @@ static void onmessage(char* msg, size_t len, void* user_data, uint16_t sid) {
 
         if (cJSON_IsString(type) && strcmp(type->valuestring, "mouse") == 0 &&
             cJSON_IsString(command) && command->valuestring[0] != '\0') {
+            printf(" [JSON] type=%s command=%s", type->valuestring, command->valuestring);
             size_t cmd_len = strlen(command->valuestring);
             fifo_push(&fifo_, (const uint8_t*)command->valuestring, (uint16_t)cmd_len, NULL, NULL);
+        } else {
+            printf(" [JSON] unknown type=%s", cJSON_IsString(type) ? type->valuestring : "(null)");
         }
         cJSON_Delete(json);
     } else if (len >= 4 && strncmp(msg, "ping", 4) == 0) {
@@ -644,20 +647,13 @@ int main() {
     printf("\n\n=== RP2350 WebRTC Demo ===\n");
     printf("[TIMING] Boot complete: %lu ms\n", (unsigned long)g_time_boot);
 
-    // USB HID init
-    board_init();
-    tusb_init();
-    critical_section_init(&cs_);
-    fifo_init(&fifo_);
-
-    // WiFi init
+    // WiFi init (must be before board_init/tusb_init on Pico 2 W)
     if (wifi_init() != 0) {
         printf("WiFi init failed, halting\n");
         while (1) {
             sleep_ms(1000);
         }
     }
-
     // WebRTC init
     if (webrtc_init() != 0) {
         printf("WebRTC init failed, halting\n");
@@ -665,6 +661,12 @@ int main() {
             sleep_ms(1000);
         }
     }
+
+    // USB HID init (after cyw43_arch_init to avoid GPIO/PIO conflict)
+    board_init();
+    tusb_init();
+    critical_section_init(&cs_);
+    fifo_init(&fifo_);
 
     printf("Entering main loop...\n");
 
@@ -729,7 +731,7 @@ static void hid_task(void) {
     if (!fifo_pop(&fifo_, &itm)) { return; }
     if (!itm.len) { return; }
     
-    printf("%s\n", itm.data);
+    printf("hid_task: %s\n", itm.data);
 
     // Message [0]: {"command":"x,y,z","type":"mouse"}
 
