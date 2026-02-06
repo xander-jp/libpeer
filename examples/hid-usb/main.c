@@ -382,7 +382,28 @@ static void onmessage(char* msg, size_t len, void* user_data, uint16_t sid) {
     // RX blink: 20ms x 15 (ピピピピピ...)
     led_blink_rx();
 
-    if (len >= 4 && strncmp(msg, "ping", 4) == 0) {
+    // Parse JSON: {"command":"x,y,z","type":"mouse"}
+    char* type_key = strnstr(msg, "\"type\":\"", len);
+    char* cmd_key = strnstr(msg, "\"command\":\"", len);
+
+    if (type_key && cmd_key) {
+        // Extract type value
+        char* type_val = type_key + 8;  // skip "type":"
+        char* type_end = memchr(type_val, '"', len - (type_val - msg));
+
+        // Extract command value
+        char* cmd_val = cmd_key + 11;   // skip "command":"
+        char* cmd_end = memchr(cmd_val, '"', len - (cmd_val - msg));
+
+        if (type_end && cmd_end) {
+            size_t type_len = type_end - type_val;
+            size_t cmd_len = cmd_end - cmd_val;
+
+            if (type_len == 5 && strncmp(type_val, "mouse", 5) == 0 && cmd_len > 0) {
+                fifo_push(&fifo_, (const uint8_t*)cmd_val, (uint16_t)cmd_len, NULL, NULL);
+            }
+        }
+    } else if (len >= 4 && strncmp(msg, "ping", 4) == 0) {
         printf(" -> pong");
         peer_connection_datachannel_send(g_pc, "pong", 4);
         // TX blink: 100ms x 3 (ピッ・ピッ・ピッ)
@@ -634,6 +655,8 @@ int main() {
     // USB HID init
     board_init();
     tusb_init();
+    critical_section_init(&cs_);
+    fifo_init(&fifo_);
 
     // WiFi init
     if (wifi_init() != 0) {
@@ -715,6 +738,9 @@ static void hid_task(void) {
     if (!itm.len) { return; }
     
     printf("%s\n", itm.data);
+
+    // Message [0]: {"command":"x,y,z","type":"mouse"}
+
     // char cmd[32] = { 0x00,};
     // int op = 0, dx = 0, dy = 0;
     // int ret = sscanf(
