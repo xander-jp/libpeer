@@ -719,13 +719,11 @@ int main() {
 
 
 static void hid_task(void) {
-    if (!tud_hid_ready()) return;
-
     FIFO_ITEM_T itm;
     if (!fifo_pop(&fifo_, &itm)) { return; }
     if (!itm.len) { return; }
-    
-    printf("hid_task: %s\n", itm.data);
+
+    printf("hid_task: %s (hid_ready=%d)\n", itm.data, tud_hid_ready());
 
     // Message [0]: {"command":"x,y,z","type":"mouse"}
 
