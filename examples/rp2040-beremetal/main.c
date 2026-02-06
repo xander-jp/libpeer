@@ -447,7 +447,7 @@ int main() {
         // Send periodic datachannel message when connected
         if (g_state == PEER_CONNECTION_COMPLETED) {
             now = board_millis();
-            if ((now - g_dcmsg_time) > 1000) {
+            if ((now - g_dcmsg_time) > 10000) {
                 g_dcmsg_time = now;
                 char msg[64];
                 snprintf(msg, sizeof(msg), "datachannel message: %05d", g_count++);
