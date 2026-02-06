@@ -442,6 +442,7 @@ static int wifi_init(void) {
     timeout_start = board_millis();
     while (1) {
         cyw43_arch_poll();
+        tud_task();
         sleep_ms(10);
 
         now = board_millis();
@@ -596,6 +597,7 @@ static int webrtc_init(void) {
         uint32_t dns_timeout = board_millis();
         while (!g_dns_done && (board_millis() - dns_timeout) < 10000) {
             cyw43_arch_poll();
+            tud_task();
             sleep_ms(10);
         }
         if (!g_dns_done) {
@@ -671,10 +673,12 @@ int main() {
         // Process peer connection
         peer_connection_loop(g_pc);
 
+        // Process USB (must run every loop to handle iPhone enumeration)
+        tud_task();
+
         // Send periodic datachannel message when connected
         if (g_state == PEER_CONNECTION_COMPLETED) {
             now = board_millis();
-            tud_task();
             hid_task();
 
             if ((now - g_dcmsg_time) > 1000) {
