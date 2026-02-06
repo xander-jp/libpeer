@@ -11,6 +11,8 @@
 #include "lwip/ip_addr.h"
 #include "tusb.h"
 #include "pico/critical_section.h"
+#include "hardware/resets.h"
+#include "hardware/structs/usb.h"
 
 
 #include "peer.h"
@@ -642,7 +644,14 @@ int main() {
         while (1) { sleep_ms(1000); }
     }
 
-    // USB HID init (right after cyw43, before WiFi connect to avoid iPhone EP0 panic)
+    // USB HID init
+    // Clear USB peripheral state to prevent iPhone cold-boot EP0 panic
+    reset_block(RESETS_RESET_USBCTRL_BITS);
+    unreset_block_wait(RESETS_RESET_USBCTRL_BITS);
+    memset(usb_dpram, 0, sizeof(*usb_dpram));
+    usb_hw->sie_ctrl = 0;
+    usb_hw->sie_status = 0xFFFFFFFF;  // W1C: clear all status bits
+    usb_hw->inte = 0;
     board_init();
     tusb_init();
     critical_section_init(&cs_);
@@ -667,8 +676,8 @@ int main() {
         // Process lwIP network events
         cyw43_arch_poll();
 
-        // Process signaling
-        peer_signaling_loop();
+        // // Process signaling
+        // peer_signaling_loop();
 
         // Process peer connection
         peer_connection_loop(g_pc);
