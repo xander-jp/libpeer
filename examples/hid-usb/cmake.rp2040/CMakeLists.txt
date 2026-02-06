@@ -1,6 +1,6 @@
 CMAKE_MINIMUM_REQUIRED(VERSION 3.12)
 
-SET(PRJ rp2040bm)
+SET(PRJ rp2040bm-hidusb)
 SET(PICO_BOARD pico_w)
 SET(HOME $ENV{HOME})
 SET(PICO_SDK_FETCH_FROM_GIT on)
@@ -196,8 +196,8 @@ ADD_EXECUTABLE(
     ${C_SOURCE_FILES}
     ${LIBSRC}
     ${HTTP_SOURCES}
-    ${CMAKE_CURRENT_LIST_DIR}/../atomic_compat.c
-    ${CMAKE_CURRENT_LIST_DIR}/../inet_compat.c
+    ${CMAKE_CURRENT_LIST_DIR}/../src/atomic_compat.c
+    ${CMAKE_CURRENT_LIST_DIR}/../src/inet_compat.c
     ${CMAKE_CURRENT_LIST_DIR}/../main.c
 )
 FILE(MAKE_DIRECTORY ${CMAKE_BINARY_DIR}/srtp2/)
