@@ -1,0 +1,148 @@
+diff --git a/usrsctplib/user_environment.c b/usrsctplib/user_environment.c
+index 3deb3ef..3b339d0 100755
+--- a/usrsctplib/user_environment.c
++++ b/usrsctplib/user_environment.c
+@@ -374,6 +374,38 @@ read_random(void *buf, size_t size)
+ 	return;
+ }
+ 
++void
++finish_random(void)
++{
++	return;
++}
++#elif defined(__RP2040_BM__)
++// RP2040 bare metal - use Pico SDK hardware RNG
++#include "pico/rand.h"
++
++void
++init_random(void)
++{
++	return;
++}
++
++void
++read_random(void *buf, size_t size)
++{
++	uint8_t *p = (uint8_t *)buf;
++	while (size >= 4) {
++		uint32_t r = get_rand_32();
++		memcpy(p, &r, 4);
++		p += 4;
++		size -= 4;
++	}
++	if (size > 0) {
++		uint32_t r = get_rand_32();
++		memcpy(p, &r, size);
++	}
++	return;
++}
++
+ void
+ finish_random(void)
+ {
+diff --git a/usrsctplib/user_socket.c b/usrsctplib/user_socket.c
+index ce9daed..6053fed 100755
+--- a/usrsctplib/user_socket.c
++++ b/usrsctplib/user_socket.c
+@@ -664,6 +664,17 @@ out:
+ int
+ getsockaddr(struct sockaddr **namp, caddr_t uaddr, size_t len)
+ {
++	printf("getsockaddr: namp=%p, uaddr=%p, len=%zu\n",
++	       (void*)namp, (void*)uaddr, len);
++	if (len >= 8) {
++		printf("getsockaddr: input bytes[0..7]: %02x %02x %02x %02x %02x %02x %02x %02x\n",
++		       ((unsigned char*)uaddr)[0], ((unsigned char*)uaddr)[1],
++		       ((unsigned char*)uaddr)[2], ((unsigned char*)uaddr)[3],
++		       ((unsigned char*)uaddr)[4], ((unsigned char*)uaddr)[5],
++		       ((unsigned char*)uaddr)[6], ((unsigned char*)uaddr)[7]);
++	}
++	printf("getsockaddr: sizeof(struct sockaddr)=%zu, offsetof(sa_data)=%zu\n",
++	       sizeof(struct sockaddr), offsetof(struct sockaddr, sa_data));
+ 	struct sockaddr *sa;
+ 	int error;
+ 
+@@ -673,12 +684,24 @@ getsockaddr(struct sockaddr **namp, caddr_t uaddr, size_t len)
+ 		return (EINVAL);
+ 	MALLOC(sa, struct sockaddr *, len, M_SONAME, M_WAITOK);
+ 	error = copyin(uaddr, sa, len);
++	printf("getsockaddr: copyin returned %d, sa=%p\n", error, (void*)sa);
++	if (len >= 8) {
++		printf("getsockaddr: copied bytes[0..7]: %02x %02x %02x %02x %02x %02x %02x %02x\n",
++		       ((unsigned char*)sa)[0], ((unsigned char*)sa)[1],
++		       ((unsigned char*)sa)[2], ((unsigned char*)sa)[3],
++		       ((unsigned char*)sa)[4], ((unsigned char*)sa)[5],
++		       ((unsigned char*)sa)[6], ((unsigned char*)sa)[7]);
++	}
+ 	if (error) {
+ 		FREE(sa, M_SONAME);
+ 	} else {
+ #ifdef HAVE_SA_LEN
++		printf("getsockaddr: HAVE_SA_LEN defined, setting sa_len=%zu\n", len);
+ 		sa->sa_len = len;
++#else
++		printf("getsockaddr: HAVE_SA_LEN not defined\n");
+ #endif
++		printf("getsockaddr: sa->sa_family=%d (at offset %zu)\n", sa->sa_family, offsetof(struct sockaddr, sa_family));
+ 		*namp = sa;
+ 	}
+ 	return (error);
+@@ -1476,17 +1499,30 @@ int
+ usrsctp_bind(struct socket *so, struct sockaddr *name, int namelen)
+ {
+ 	struct sockaddr *sa;
++	int gsa_err, bind_err;
++
++	printf("usrsctp_bind: so=%p, name=%p, namelen=%d\n",
++	       (void*)so, (void*)name, namelen);
+ 
+ 	if (so == NULL) {
+ 		errno = EBADF;
+ 		return (-1);
+ 	}
+-	if ((errno = getsockaddr(&sa, (caddr_t)name, namelen)) != 0)
++
++	gsa_err = getsockaddr(&sa, (caddr_t)name, namelen);
++	printf("usrsctp_bind: getsockaddr returned %d, sa=%p\n", gsa_err, (void*)sa);
++	if (gsa_err != 0) {
++		errno = gsa_err;
+ 		return (-1);
++	}
+ 
+-	errno = sobind(so, sa);
++	printf("usrsctp_bind: calling sobind, sa->sa_family=%d\n", sa->sa_family);
++	bind_err = sobind(so, sa);
++	printf("usrsctp_bind: sobind returned %d\n", bind_err);
+ 	FREE(sa, M_SONAME);
+-	if (errno) {
++	errno = bind_err;
++	if (bind_err) {
++		printf("usrsctp_bind: failed with errno=%d\n", bind_err);
+ 		return (-1);
+ 	} else {
+ 		return (0);
+diff --git a/usrsctplib/usrsctp.h b/usrsctplib/usrsctp.h
+index e0c17c3..919a08e 100644
+--- a/usrsctplib/usrsctp.h
++++ b/usrsctplib/usrsctp.h
+@@ -43,6 +43,9 @@ extern "C" {
+ #endif
+ #include <winsock2.h>
+ #include <ws2tcpip.h>
++#elif defined(CONFIG_USE_LWIP)
++#include <lwip/sockets.h>
++#include <lwip/inet.h>
+ #else
+ #include <sys/socket.h>
+ #include <netinet/in.h>
+@@ -120,7 +123,8 @@ struct sctp_common_header {
+  * tune with other sockaddr_* structures.
+  */
+ #if defined(__APPLE__) || defined(__Bitrig__) || defined(__DragonFly__) || \
+-    defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__)
++    defined(__FreeBSD__) || defined(__OpenBSD__) || defined(__NetBSD__) || \
++    defined(__RP2040_BM__)
+ struct sockaddr_conn {
+ 	uint8_t sconn_len;
+ 	uint8_t sconn_family;
