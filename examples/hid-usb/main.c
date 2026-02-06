@@ -425,19 +425,6 @@ static int wifi_init(void) {
     uint32_t now;
     uint32_t timeout_start;
 
-    if (cyw43_arch_init()) {
-        printf("WiFi init failed\n");
-        return -1;
-    }
-
-    // Quick blink to confirm cyw43 init succeeded (disabled for timing measurement)
-    // for (int i = 0; i < 3; i++) {
-    //     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
-    //     sleep_ms(100);
-    //     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-    //     sleep_ms(100);
-    // }
-
     cyw43_arch_enable_sta_mode();
 
     // Start async WiFi connection
@@ -647,26 +634,29 @@ int main() {
     printf("\n\n=== RP2350 WebRTC Demo ===\n");
     printf("[TIMING] Boot complete: %lu ms\n", (unsigned long)g_time_boot);
 
-    // WiFi init (must be before board_init/tusb_init on Pico 2 W)
-    if (wifi_init() != 0) {
-        printf("WiFi init failed, halting\n");
-        while (1) {
-            sleep_ms(1000);
-        }
-    }
-    // WebRTC init
-    if (webrtc_init() != 0) {
-        printf("WebRTC init failed, halting\n");
-        while (1) {
-            sleep_ms(1000);
-        }
+    // CYW43 must init before board_init/tusb_init on Pico 2 W (GPIO/PIO conflict)
+    if (cyw43_arch_init()) {
+        printf("cyw43_arch_init failed, halting\n");
+        while (1) { sleep_ms(1000); }
     }
 
-    // USB HID init (after cyw43_arch_init to avoid GPIO/PIO conflict)
+    // USB HID init (right after cyw43, before WiFi connect to avoid iPhone EP0 panic)
     board_init();
     tusb_init();
     critical_section_init(&cs_);
     fifo_init(&fifo_);
+
+    // WiFi connect
+    if (wifi_init() != 0) {
+        printf("WiFi init failed, halting\n");
+        while (1) { sleep_ms(1000); }
+    }
+
+    // WebRTC init
+    if (webrtc_init() != 0) {
+        printf("WebRTC init failed, halting\n");
+        while (1) { sleep_ms(1000); }
+    }
 
     printf("Entering main loop...\n");
 
