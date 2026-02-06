@@ -14,6 +14,7 @@
 
 
 #include "peer.h"
+#include "cJSON.h"
 
 //=============================================================================
 // Configuration - set via environment variables or defaults below
@@ -383,26 +384,17 @@ static void onmessage(char* msg, size_t len, void* user_data, uint16_t sid) {
     led_blink_rx();
 
     // Parse JSON: {"command":"x,y,z","type":"mouse"}
-    char* type_key = strnstr(msg, "\"type\":\"", len);
-    char* cmd_key = strnstr(msg, "\"command\":\"", len);
+    cJSON* json = cJSON_ParseWithLength(msg, len);
+    if (json) {
+        const cJSON* type = cJSON_GetObjectItemCaseSensitive(json, "type");
+        const cJSON* command = cJSON_GetObjectItemCaseSensitive(json, "command");
 
-    if (type_key && cmd_key) {
-        // Extract type value
-        char* type_val = type_key + 8;  // skip "type":"
-        char* type_end = memchr(type_val, '"', len - (type_val - msg));
-
-        // Extract command value
-        char* cmd_val = cmd_key + 11;   // skip "command":"
-        char* cmd_end = memchr(cmd_val, '"', len - (cmd_val - msg));
-
-        if (type_end && cmd_end) {
-            size_t type_len = type_end - type_val;
-            size_t cmd_len = cmd_end - cmd_val;
-
-            if (type_len == 5 && strncmp(type_val, "mouse", 5) == 0 && cmd_len > 0) {
-                fifo_push(&fifo_, (const uint8_t*)cmd_val, (uint16_t)cmd_len, NULL, NULL);
-            }
+        if (cJSON_IsString(type) && strcmp(type->valuestring, "mouse") == 0 &&
+            cJSON_IsString(command) && command->valuestring[0] != '\0') {
+            size_t cmd_len = strlen(command->valuestring);
+            fifo_push(&fifo_, (const uint8_t*)command->valuestring, (uint16_t)cmd_len, NULL, NULL);
         }
+        cJSON_Delete(json);
     } else if (len >= 4 && strncmp(msg, "ping", 4) == 0) {
         printf(" -> pong");
         peer_connection_datachannel_send(g_pc, "pong", 4);
