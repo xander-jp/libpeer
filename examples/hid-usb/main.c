@@ -503,13 +503,13 @@ static int wifi_init(void) {
 
 wifi_connected:
     // Blink LED to confirm WiFi connected (disabled for timing measurement)
-    // for (int i = 0; i < 5; i++) {
-    //     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
-    //     sleep_ms(100);
-    //     cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
-    //     sleep_ms(100);
-    // }
-    // cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+    for (int i = 0; i < 5; i++) {
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
+        sleep_ms(100);
+        cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 0);
+        sleep_ms(100);
+    }
+    cyw43_arch_gpio_put(CYW43_WL_GPIO_LED_PIN, 1);
 
     return 0;
 }
@@ -644,14 +644,6 @@ int main() {
         while (1) { sleep_ms(1000); }
     }
 
-    // USB HID init
-    // Clear USB peripheral state to prevent iPhone cold-boot EP0 panic
-    reset_block(RESETS_RESET_USBCTRL_BITS);
-    unreset_block_wait(RESETS_RESET_USBCTRL_BITS);
-    memset(usb_dpram, 0, sizeof(*usb_dpram));
-    usb_hw->sie_ctrl = 0;
-    usb_hw->sie_status = 0xFFFFFFFF;  // W1C: clear all status bits
-    usb_hw->inte = 0;
     board_init();
     tusb_init();
     critical_section_init(&cs_);
@@ -676,18 +668,13 @@ int main() {
         // Process lwIP network events
         cyw43_arch_poll();
 
-        // // Process signaling
-        // peer_signaling_loop();
-
         // Process peer connection
         peer_connection_loop(g_pc);
-
-        // Process USB (must run every loop to handle iPhone enumeration)
-        tud_task();
 
         // Send periodic datachannel message when connected
         if (g_state == PEER_CONNECTION_COMPLETED) {
             now = board_millis();
+            tud_task();
             hid_task();
 
             if ((now - g_dcmsg_time) > 1000) {
@@ -729,6 +716,7 @@ int main() {
 
 static void hid_task(void) {
     FIFO_ITEM_T itm;
+    if (!tud_hid_ready()) { return; }
     if (!fifo_pop(&fifo_, &itm)) { return; }
     if (!itm.len) { return; }
 
