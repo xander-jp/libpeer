@@ -11,6 +11,7 @@
 #include "lwip/ip_addr.h"
 #include "tusb.h"
 #include "pico/critical_section.h"
+#include "pico/multicore.h"
 #include "hardware/resets.h"
 #include "hardware/structs/usb.h"
 
@@ -620,7 +621,42 @@ static int webrtc_init(void) {
 }
 
 //=============================================================================
-// Main loop
+// Core 1: WebRTC / ICE / DTLS / SCTP (heavy, may block)
+//=============================================================================
+static void core1_entry(void) {
+    uint32_t now;
+
+    while (1) {
+        cyw43_arch_poll();
+        peer_connection_loop(g_pc);
+
+        if (g_state == PEER_CONNECTION_COMPLETED) {
+            now = board_millis();
+
+            if ((now - g_dcmsg_time) > 1000) {
+                g_dcmsg_time = now;
+                char msg[64];
+                snprintf(msg, sizeof(msg), "datachannel message: %05d", g_count++);
+                peer_connection_datachannel_send(g_pc, msg, strlen(msg));
+
+                if (!g_first_tx_logged) {
+                    g_time_first_tx = board_millis();
+                    g_first_tx_logged = true;
+                    printf("[TIMING] First message TX: %lu ms (from boot)\n", (unsigned long)g_time_first_tx);
+                    printf("[TIMING] Time from DataChannel open to first TX: %lu ms\n",
+                           (unsigned long)(g_time_first_tx - g_time_datachannel_open));
+                }
+
+                led_blink_tx();
+            }
+        }
+
+        sleep_us(100);
+    }
+}
+
+//=============================================================================
+// Main loop (Core 0: USB + HID + LED)
 //=============================================================================
 int main() {
     uint32_t now;
@@ -662,45 +698,14 @@ int main() {
     }
 
     printf("Entering main loop...\n");
+    printf("Launching core1 for WebRTC (ICE/DTLS/SCTP)...\n");
+    multicore_launch_core1(core1_entry);
 
-    // Main loop - single threaded
+    // Core 0: USB + HID + LED (must never block)
     while (1) {
-        // Process lwIP network events
-        cyw43_arch_poll();
-
-        // Process peer connection
-        peer_connection_loop(g_pc);
-
-        // Send periodic datachannel message when connected
-        if (g_state == PEER_CONNECTION_COMPLETED) {
-            now = board_millis();
-            tud_task();
-            hid_task();
-
-            if ((now - g_dcmsg_time) > 1000) {
-                g_dcmsg_time = now;
-                char msg[64];
-                snprintf(msg, sizeof(msg), "datachannel message: %05d", g_count++);
-                peer_connection_datachannel_send(g_pc, msg, strlen(msg));
-
-                // Log first TX timing
-                if (!g_first_tx_logged) {
-                    g_time_first_tx = board_millis();
-                    g_first_tx_logged = true;
-                    printf("[TIMING] First message TX: %lu ms (from boot)\n", (unsigned long)g_time_first_tx);
-                    printf("[TIMING] Time from DataChannel open to first TX: %lu ms\n",
-                           (unsigned long)(g_time_first_tx - g_time_datachannel_open));
-                }
-
-                // TX blink: 100ms x 3 (ピッ・ピッ・ピッ)
-                led_blink_tx();
-            }
-        }
-
-        // Process LED blink pattern
+        tud_task();
+        hid_task();
         led_blink_loop();
-
-        // Small delay to prevent busy loop
         sleep_us(100);
     }
 

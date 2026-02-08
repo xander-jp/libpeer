@@ -209,6 +209,7 @@ PROJECT(${PRJ} VERSION 1.0.0)
 TARGET_LINK_LIBRARIES(
     ${PRJ}
     pico_stdlib
+    pico_multicore
     hardware_spi
     hardware_i2c
     tinyusb_host
