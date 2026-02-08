@@ -445,7 +445,6 @@ static int wifi_init(void) {
     timeout_start = board_millis();
     while (1) {
         cyw43_arch_poll();
-        tud_task();
         sleep_ms(10);
 
         now = board_millis();
@@ -600,7 +599,6 @@ static int webrtc_init(void) {
         uint32_t dns_timeout = board_millis();
         while (!g_dns_done && (board_millis() - dns_timeout) < 10000) {
             cyw43_arch_poll();
-            tud_task();
             sleep_ms(10);
         }
         if (!g_dns_done) {
@@ -621,10 +619,30 @@ static int webrtc_init(void) {
 }
 
 //=============================================================================
-// Core 1: WebRTC / ICE / DTLS / SCTP (heavy, may block)
+// Core 1: CYW43 + WiFi + WebRTC (all network on core1)
+// cyw43_arch_init() called here so background worker IRQs fire on core1,
+// never blocking core0's USB interrupts.
 //=============================================================================
 static void core1_entry(void) {
     uint32_t now;
+
+    // CYW43 init on core1: background worker binds to THIS core
+    if (cyw43_arch_init()) {
+        printf("core1: cyw43_arch_init failed\n");
+        while (1) { sleep_ms(1000); }
+    }
+
+    if (wifi_init() != 0) {
+        printf("core1: WiFi init failed\n");
+        while (1) { sleep_ms(1000); }
+    }
+
+    if (webrtc_init() != 0) {
+        printf("core1: WebRTC init failed\n");
+        while (1) { sleep_ms(1000); }
+    }
+
+    printf("core1: entering WebRTC loop\n");
 
     while (1) {
         cyw43_arch_poll();
@@ -651,6 +669,7 @@ static void core1_entry(void) {
             }
         }
 
+        led_blink_loop();
         sleep_us(100);
     }
 }
@@ -659,8 +678,6 @@ static void core1_entry(void) {
 // Main loop (Core 0: USB + HID + LED)
 //=============================================================================
 int main() {
-    uint32_t now;
-
     // Explicit UART setup for RP2350 compatibility
     uart_init(uart0, 115200);
     gpio_set_function(0, GPIO_FUNC_UART);  // TX
@@ -671,49 +688,35 @@ int main() {
     // Wait for serial
     sleep_ms(2000);
     g_time_boot = board_millis();
-    printf("\n\n=== RP2350 WebRTC Demo ===\n");
+    printf("\n\n=== RP2040 WebRTC+HID Demo (Dual Core) ===\n");
     printf("[TIMING] Boot complete: %lu ms\n", (unsigned long)g_time_boot);
 
-    // CYW43 must init before board_init/tusb_init on Pico 2 W (GPIO/PIO conflict)
-    if (cyw43_arch_init()) {
-        printf("cyw43_arch_init failed, halting\n");
-        while (1) { sleep_ms(1000); }
-    }
-
+    // Core 0: USB init (no CYW43 here - that goes to core1)
     board_init();
     tusb_init();
     critical_section_init(&cs_);
     fifo_init(&fifo_);
 
-    // WiFi connect
-    if (wifi_init() != 0) {
-        printf("WiFi init failed, halting\n");
-        while (1) { sleep_ms(1000); }
+    // Wait until USB device is fully mounted by host
+    printf("Waiting for USB mount...\n");
+    while (!tud_mounted()) {
+        tud_task();
+        tight_loop_contents();
     }
+    printf("USB mounted.\n");
 
-    // WebRTC init
-    if (webrtc_init() != 0) {
-        printf("WebRTC init failed, halting\n");
-        while (1) { sleep_ms(1000); }
-    }
-
-    printf("Entering main loop...\n");
-    printf("Launching core1 for WebRTC (ICE/DTLS/SCTP)...\n");
+    // Launch core1: CYW43 + WiFi + WebRTC
+    // cyw43_arch_init() on core1 ensures background worker IRQs
+    // fire on core1, keeping core0's USB IRQs unblocked
+    printf("Launching core1 for CYW43/WiFi/WebRTC...\n");
     multicore_launch_core1(core1_entry);
 
-    // Core 0: USB + HID + LED (must never block)
+    // Core 0: USB only (tud_task must never be blocked)
     while (1) {
         tud_task();
         hid_task();
-        led_blink_loop();
         sleep_us(100);
     }
-
-    // Cleanup (never reached in bare metal)
-    peer_signaling_disconnect();
-    peer_connection_destroy(g_pc);
-    peer_deinit();
-    cyw43_arch_deinit();
 
     return 0;
 }
