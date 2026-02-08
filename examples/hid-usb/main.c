@@ -10,7 +10,7 @@
 #include "lwip/dns.h"
 #include "lwip/ip_addr.h"
 #include "tusb.h"
-#include "pico/critical_section.h"
+#include "pico/util/queue.h"
 #include "pico/multicore.h"
 #include "hardware/resets.h"
 #include "hardware/structs/usb.h"
@@ -65,37 +65,18 @@ enum {
     PARSE_END
 };
 
-static critical_section_t cs_;
+//=============================================================================
+// Queue (core1 -> core0, multicore-safe)
+//=============================================================================
+#define QUEUE_SIZE     32
+#define QUEUE_ITEM_LEN 128
 
-//=============================================================================
-// Fifo
-//=============================================================================
-enum
-{
-    FIFO_SIZE = 32,
-    FIFO_ITEM_LEN = 128,
-    FIFO_PROPERTY_MAX
-};
-typedef struct FIFO_ITEM_T_{
-    uint8_t data[FIFO_ITEM_LEN];
+typedef struct {
+    uint8_t data[QUEUE_ITEM_LEN];
     uint16_t len;
-    struct tcp_pcb* tpcb;
-    void* arg;
-} FIFO_ITEM_T;
+} queue_entry_t;
 
-
-typedef struct FIFO_T_ {
-    FIFO_ITEM_T items[FIFO_SIZE];
-    uint16_t read_pos;
-    uint16_t write_pos;
-} FIFO_T;
-
-static FIFO_T fifo_;
-static void fifo_init(FIFO_T* f);
-static bool fifo_is_empty(const FIFO_T* f);
-static bool fifo_is_full(const FIFO_T* f);
-static bool fifo_push(FIFO_T* f, const uint8_t* data, uint16_t len, void* tpcb, void* arg);
-static bool fifo_pop(FIFO_T* f, FIFO_ITEM_T* out); 
+static queue_t g_queue;
 static void hid_task(void);
 
 //=============================================================================
@@ -395,8 +376,11 @@ static void onmessage(char* msg, size_t len, void* user_data, uint16_t sid) {
         if (cJSON_IsString(type) && strcmp(type->valuestring, "mouse") == 0 &&
             cJSON_IsString(command) && command->valuestring[0] != '\0') {
             printf(" [JSON] type=%s command=%s", type->valuestring, command->valuestring);
-            size_t cmd_len = strlen(command->valuestring);
-            fifo_push(&fifo_, (const uint8_t*)command->valuestring, (uint16_t)cmd_len, NULL, NULL);
+            queue_entry_t entry = {0};
+            entry.len = strlen(command->valuestring);
+            if (entry.len > QUEUE_ITEM_LEN) entry.len = QUEUE_ITEM_LEN;
+            memcpy(entry.data, command->valuestring, entry.len);
+            queue_try_add(&g_queue, &entry);
         } else {
             printf(" [JSON] unknown type=%s", cJSON_IsString(type) ? type->valuestring : "(null)");
         }
@@ -694,8 +678,7 @@ int main() {
     // Core 0: USB init (no CYW43 here - that goes to core1)
     board_init();
     tusb_init();
-    critical_section_init(&cs_);
-    fifo_init(&fifo_);
+    queue_init(&g_queue, sizeof(queue_entry_t), QUEUE_SIZE);
 
     // Wait until USB device is fully mounted by host
     printf("Waiting for USB mount...\n");
@@ -723,9 +706,9 @@ int main() {
 
 
 static void hid_task(void) {
-    FIFO_ITEM_T itm;
+    queue_entry_t itm;
     if (!tud_hid_ready()) { return; }
-    if (!fifo_pop(&fifo_, &itm)) { return; }
+    if (!queue_try_remove(&g_queue, &itm)) { return; }
     if (!itm.len) { return; }
 
     printf("hid_task: %s (hid_ready=%d)\n", itm.data, tud_hid_ready());
@@ -753,66 +736,6 @@ static void hid_task(void) {
     //         }
     //     }
     // }
-}
-
-static void fifo_init(FIFO_T* f)
-{
-    critical_section_enter_blocking(&cs_);
-    f->read_pos = 0;
-    f->write_pos = 0;
-    critical_section_exit(&cs_);
-}
-
-static bool fifo_is_empty(const FIFO_T* f)
-{
-    bool ret = true;
-    critical_section_enter_blocking(&cs_);
-    ret = (f->read_pos == f->write_pos);
-    critical_section_exit(&cs_);
-    return(ret);
-}
-
-static bool fifo_is_full(const FIFO_T* f)
-{
-    bool ret = true;
-    critical_section_enter_blocking(&cs_);
-    ret = (((f->write_pos + 1) & 31) == f->read_pos);
-    critical_section_exit(&cs_);
-    return(ret);
-}
-
-static bool fifo_push(FIFO_T* f, const uint8_t* data, uint16_t len, void* tpcb, void* arg)
-{
-    if (fifo_is_full(f)) {
-        return(false);
-    }
-    if (len > FIFO_ITEM_LEN) {
-        len = FIFO_ITEM_LEN;
-    }
-    critical_section_enter_blocking(&cs_);
-    FIFO_ITEM_T* item = &f->items[f->write_pos];
-    item->len = len;
-    item->tpcb = tpcb;
-    item->arg = arg;
-    memset(item->data, 0, sizeof(item->data));
-    for (uint16_t i = 0; i < len; i++) {
-        item->data[i] = data[i];
-    }
-    f->write_pos = (f->write_pos + 1) & 31;
-    critical_section_exit(&cs_);
-    return(true);
-}
-
-static bool fifo_pop(FIFO_T* f, FIFO_ITEM_T* out)
-{
-    if (fifo_is_empty(f)) {
-        return(false);
-    }
-    critical_section_enter_blocking(&cs_);
-    (*out) = f->items[f->read_pos];
-    f->read_pos = (f->read_pos + 1) & 31;
-    critical_section_exit(&cs_);
-    return(true);
 }
 
 uint16_t tud_hid_get_report_cb(uint8_t instance,
