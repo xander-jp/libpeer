@@ -6,3 +6,5 @@
 #define CFG_TUD_ENDPOINT0_SIZE    64
 #define CFG_TUD_HID               1
 #define CFG_TUD_HID_EP_BUFSIZE    16
+#define CFG_TUD_VBUS_MONITORING   0
+

@@ -145,13 +145,13 @@ uint8_t const desc_configuration[] = {
         ITF_NUM_TOTAL,
         0,
         CONFIG_TOTAL_LEN,
-        TUSB_DESC_CONFIG_ATT_REMOTE_WAKEUP,
+        0x00,
         100
     ), TUD_HID_DESCRIPTOR(
         ITF_NUM_HID,
         0,
         HID_ITF_PROTOCOL_MOUSE,
-        sizeof(desc_hid_report),
+        sizeof(desc_hid_report_b),
         EPNUM_HID,
         8,
         10
@@ -189,8 +189,8 @@ uint8_t const desc_configuration_b[] = {
     0x00,                       // bCountryCode
     0x01,                       // bNumDescriptors
     HID_DESC_TYPE_REPORT,       // bDescriptorType (Report)
-    sizeof(desc_hid_report) & 0xFF, // wDescriptorLength LSB
-    (sizeof(desc_hid_report) >> 8), // wDescriptorLength MSB
+    sizeof(desc_hid_report_b) & 0xFF, // wDescriptorLength LSB
+    (sizeof(desc_hid_report_b) >> 8), // wDescriptorLength MSB
 
     // ----- Endpoint Descriptor (INT IN) -----
     0x07,                       // bLength
@@ -361,10 +361,7 @@ static void onmessage(char* msg, size_t len, void* user_data, uint16_t sid) {
         printf("[TIMING] Time from DataChannel open to first RX: %lu ms\n",
                (unsigned long)(g_time_first_rx - g_time_datachannel_open));
     }
-
-    printf("Message [%d]: %.*s", sid, (int)len, msg);
-
-    // RX blink: 20ms x 15 (ピピピピピ...)
+    // RX blink: 20ms x 15
     led_blink_rx();
 
     // Parse JSON: {"command":"x,y,z","type":"mouse"}
@@ -375,23 +372,20 @@ static void onmessage(char* msg, size_t len, void* user_data, uint16_t sid) {
 
         if (cJSON_IsString(type) && strcmp(type->valuestring, "mouse") == 0 &&
             cJSON_IsString(command) && command->valuestring[0] != '\0') {
-            printf(" [JSON] type=%s command=%s", type->valuestring, command->valuestring);
             queue_entry_t entry = {0};
             entry.len = strlen(command->valuestring);
             if (entry.len > QUEUE_ITEM_LEN) entry.len = QUEUE_ITEM_LEN;
             memcpy(entry.data, command->valuestring, entry.len);
             queue_try_add(&g_queue, &entry);
         } else {
-            printf(" [JSON] unknown type=%s", cJSON_IsString(type) ? type->valuestring : "(null)");
+            printf(" [JSON] unknown type=%s\n", cJSON_IsString(type) ? type->valuestring : "(null)");
         }
         cJSON_Delete(json);
     } else if (len >= 4 && strncmp(msg, "ping", 4) == 0) {
-        printf(" -> pong");
         peer_connection_datachannel_send(g_pc, "pong", 4);
-        // TX blink: 100ms x 3 (ピッ・ピッ・ピッ)
+        // TX blink: 100ms x 3
         led_blink_tx();
     }
-    printf("\n");
 }
 
 //=============================================================================
@@ -629,7 +623,6 @@ static void core1_entry(void) {
     printf("core1: entering WebRTC loop\n");
 
     while (1) {
-        cyw43_arch_poll();
         peer_connection_loop(g_pc);
 
         if (g_state == PEER_CONNECTION_COMPLETED) {
@@ -654,7 +647,7 @@ static void core1_entry(void) {
         }
 
         led_blink_loop();
-        sleep_us(100);
+        sleep_us(500);
     }
 }
 
@@ -675,38 +668,40 @@ int main() {
     printf("\n\n=== RP2040 WebRTC+HID Demo (Dual Core) ===\n");
     printf("[TIMING] Boot complete: %lu ms\n", (unsigned long)g_time_boot);
 
-    // Core 0: USB init (no CYW43 here - that goes to core1)
-    board_init();
-    tusb_init();
     queue_init(&g_queue, sizeof(queue_entry_t), QUEUE_SIZE);
-
-    // Wait until USB device is fully mounted by host
-    printf("Waiting for USB mount...\n");
-    while (!tud_mounted()) {
-        tud_task();
-        tight_loop_contents();
-    }
-    printf("USB mounted.\n");
 
     // Launch core1: CYW43 + WiFi + WebRTC
     // cyw43_arch_init() on core1 ensures background worker IRQs
     // fire on core1, keeping core0's USB IRQs unblocked
     printf("Launching core1 for CYW43/WiFi/WebRTC...\n");
     multicore_launch_core1(core1_entry);
-
+    //
+    while (1) {
+        queue_entry_t itm;
+        if (queue_try_remove(&g_queue, &itm)) { break; }
+        sleep_ms(100);
+    }
     // Core 0: USB only (tud_task must never be blocked)
+    board_init();
+    irq_set_priority(USBCTRL_IRQ, 0);
+    tusb_init();
+    //
     while (1) {
         tud_task();
         hid_task();
-        sleep_us(100);
+        tight_loop_contents();
     }
-
     return 0;
 }
 
 
 static void hid_task(void) {
     queue_entry_t itm;
+    static uint32_t start_ms = 0;
+    uint32_t now = board_millis();
+    if ((now - start_ms) < 10) { return; }
+    start_ms = now;
+    if (!tud_mounted()) { return; }
     if (!tud_hid_ready()) { return; }
     if (!queue_try_remove(&g_queue, &itm)) { return; }
     if (!itm.len) { return; }
@@ -715,27 +710,20 @@ static void hid_task(void) {
 
     // Message [0]: {"command":"x,y,z","type":"mouse"}
 
-    // char cmd[32] = { 0x00,};
-    // int op = 0, dx = 0, dy = 0;
-    // int ret = sscanf(
-    //                 itm.data,
-    //                 "%63s %d %d %d",
-    //                 cmd,
-    //                 &op, &dx, &dy
-    //             );
-    // if (ret == 4) {
-    //     } else if (strncmp(cmd, "failed", 6) == 0) {
-    //         printf("remote scenario by memcached, failed.\n");
-    //         networkstat++;
-    //     } else if (strncmp(cmd, "mouse", 5) == 0) {
-    //         printf("%s %d %d %d\n", cmd, op, dx, dy);
-    //         if (op || dx || dy) {
-    //             tud_hid_mouse_report(0, (int8_t)op, (int8_t)dx, (int8_t)dy, 0, 0);
-    //         } else if (!op && !dx && !dy) {
-    //             tud_hid_mouse_report(0, 0, 0, 0, 0, 0);
-    //         }
-    //     }
-    // }
+    int op = 0, dx = 0, dy = 0;
+    int ret = sscanf(
+        itm.data,
+        "%d %d %d",
+        &op, &dx, &dy
+    );
+    if (ret == 3) {
+        printf("%d %d %d\n", op, dx, dy);
+        if (op || dx || dy) {
+            tud_hid_mouse_report(0, (int8_t)op, (int8_t)dx, (int8_t)dy, 0, 0);
+        } else if (!op && !dx && !dy) {
+            tud_hid_mouse_report(0, 0, 0, 0, 0, 0);
+        }
+    }
 }
 
 uint16_t tud_hid_get_report_cb(uint8_t instance,
