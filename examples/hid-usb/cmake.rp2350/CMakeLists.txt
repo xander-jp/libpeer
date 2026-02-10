@@ -107,10 +107,6 @@ SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -D__RP2040_BM__")
 # SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DCONFIG_USE_LWIP=1")
 # SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DCONFIG_USE_LWIP=1")
 
-# Use mbedtls 2.x API (Pico SDK uses mbedtls 2.x)
-SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DCONFIG_MBEDTLS_2_X=1")
-SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DCONFIG_MBEDTLS_2_X=1")
-
 # libsrtp: use mbedtls for AES and define CPU type
 SET(CMAKE_CXX_FLAGS "${CMAKE_CXX_FLAGS} -DMBEDTLS")
 SET(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} -DMBEDTLS")
@@ -237,7 +233,9 @@ TARGET_LINK_LIBRARIES(
     ${PRJ}
     pico_stdlib
     pico_multicore
+    pico_time
     hardware_spi
+    hardware_timer
     hardware_i2c
     tinyusb_host
     tinyusb_device
@@ -256,6 +254,7 @@ target_compile_definitions(${PRJ} PRIVATE
     PICO_DEFAULT_UART_TX_PIN=0
     PICO_DEFAULT_UART_RX_PIN=1
     PICO_DEFAULT_UART_BAUD_RATE=115200
+    MBEDTLS_PLATFORM_TIME_ALT
 )
 
 pico_add_extra_outputs(${PRJ})
@@ -265,4 +264,8 @@ ADD_COMPILE_OPTIONS(
     -Wno-format          # int != int32_t as far as the compiler is concerned because gcc has int32_t as long int
     -Wno-unused-function # we have some for the docs that aren't called
     -Wno-maybe-uninitialized
+    -Wno-incompatible-pointer-types
+    -Wno-discarded-qualifier
+    -Wno-error=incompatible-pointer-types
 )
+

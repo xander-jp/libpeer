@@ -122,4 +122,7 @@
 #define MBEDTLS_SSL_KEEP_PEER_CERTIFICATE /* Required for DTLS fingerprint verification */
 #define __unix__
 
+#define MBEDTLS_PLATFORM_MS_TIME_ALT
+
+
 #endif  // MBEDTLS_CONFIG_H
