@@ -1,14 +1,19 @@
 #!/usr/bin/env python3
 """Monster Strike scene detector - camera capture base."""
 
+import argparse
 import glob
 import math
 import os
+import queue
+import threading
 import time
 
 import cv2
 import numpy as np
 from picamera2 import Picamera2
+
+import common as hid
 
 SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots")
 
@@ -227,10 +232,10 @@ def scene_similarity(frame, templates_hist, templates_region):
         before = score_map[name]
         delta = custom["weight"] * diff
         score_map[name] += delta
-        print(f"  CUSTOM[{name}] r{key_idx}={key_score:.3f} "
-              f"avg({','.join(f'r{i}' for i in other_idxs)})={other_avg:.3f} "
-              f"diff={diff:+.4f} delta={delta:+.4f}  "
-              f"{before:.4f}->{score_map[name]:.4f}")
+        # print(f"  CUSTOM[{name}] r{key_idx}={key_score:.3f} "
+        #       f"avg({','.join(f'r{i}' for i in other_idxs)})={other_avg:.3f} "
+        #       f"diff={diff:+.4f} delta={delta:+.4f}  "
+        #       f"{before:.4f}->{score_map[name]:.4f}")
 
     results = sorted(score_map.items(), key=lambda x: x[1], reverse=True)
     return results
@@ -250,16 +255,18 @@ S_DECK_SELECT = "DECK-SELECT"
 S_IN_PLAY = "NORMAL-QUEST-UIJIN-IN-PLAY"
 S_CLEAR_OK = "CLEAR-OK"
 S_SPECIAL_REWARD = "SPECIAL-REWARD"
+S_EVENT = "EVENT"
 S_REWARD_NEXT = "REWARD-NEXT"
 
 # --- FSM transition table ---
 # state -> [allowed next states]  (game flow order)
 FSM_TRANSITIONS = {
-    S_UNKNOWN: [S_HOME, S_QUEST, S_NORMAL_QUEST, S_NORMAL_QUEST_UIJIN,
+    S_UNKNOWN: [S_HOME, S_EVENT, S_QUEST, S_NORMAL_QUEST, S_NORMAL_QUEST_UIJIN,
                 S_NORMAL_QUEST_UIJIN_KARYU, S_HELPER_SELECT, S_DECK_SELECT,
                 S_IN_PLAY, S_CLEAR_OK, S_SPECIAL_REWARD, S_REWARD_NEXT],
-    S_HOME:                     [S_QUEST],
-    S_QUEST:                    [S_NORMAL_QUEST, S_NORMAL_QUEST_UIJIN, S_HOME],
+    S_HOME:                     [S_EVENT, S_QUEST, S_NORMAL_QUEST_UIJIN],
+    S_EVENT:                    [S_NORMAL_QUEST_UIJIN, S_HOME],
+    S_QUEST:                    [S_NORMAL_QUEST, S_HOME],
     S_NORMAL_QUEST:             [S_NORMAL_QUEST_UIJIN, S_QUEST, S_HOME],
     S_NORMAL_QUEST_UIJIN:      [S_NORMAL_QUEST_UIJIN_KARYU, S_NORMAL_QUEST, S_HOME],
     S_NORMAL_QUEST_UIJIN_KARYU:[S_HELPER_SELECT, S_HOME],
@@ -270,6 +277,61 @@ FSM_TRANSITIONS = {
     S_SPECIAL_REWARD:           [S_REWARD_NEXT],
     S_REWARD_NEXT:              [S_HOME],
 }
+
+
+# --- FSM state -> HID action mapping ---
+FSM_ACTIONS = {
+    S_HOME:                     "quest_bt_click",
+    S_EVENT:                    "normal_ikusei_bt_click",
+    S_QUEST:                    "normal_bt_click",
+    S_NORMAL_QUEST:             "shojin_bt_click",
+    S_NORMAL_QUEST_UIJIN:      "karyu_bt_click",
+    S_NORMAL_QUEST_UIJIN_KARYU:"solo_bt_click",
+    S_HELPER_SELECT:            "helper_select",
+    S_DECK_SELECT:              "shutsugeki_bt_click",
+    S_IN_PLAY:                  "play_turn",
+    S_CLEAR_OK:                 "clear_ok",
+    S_SPECIAL_REWARD:           "special_reward",
+    S_REWARD_NEXT:              "reward_next",
+}
+
+_action_queue = queue.Queue()
+_worker_idle = threading.Event()
+_worker_idle.set()
+
+
+def _action_worker():
+    """Worker thread: consume actions from FIFO queue sequentially."""
+    while True:
+        action_name, hid_args = _action_queue.get()
+        _worker_idle.clear()
+        print(f"  [HID] dispatching: {action_name} (queue size: {_action_queue.qsize()})")
+        try:
+            hid.ACTIONS[action_name](hid_args)
+            print(f"  [HID] done: {action_name}")
+        except Exception as e:
+            print(f"  [HID] error in {action_name}: {e}")
+        _action_queue.task_done()
+        if _action_queue.empty():
+            _worker_idle.set()
+
+
+threading.Thread(target=_action_worker, daemon=True).start()
+
+
+def dispatch_action(action_name, hid_args):
+    """Enqueue an HID action for sequential execution."""
+    print(f"  [HID] enqueue: {action_name} (queue size: {_action_queue.qsize()})")
+    _action_queue.put((action_name, hid_args))
+
+
+def dispatch_if_idle(action_name, hid_args):
+    """Dispatch only if worker is idle. Skip otherwise."""
+    if _worker_idle.is_set():
+        print(f"  [HID] enqueue (idle): {action_name}")
+        _action_queue.put((action_name, hid_args))
+    else:
+        print(f"  [HID] skip (busy): {action_name}")
 
 
 def _score_of(scores, name):
@@ -300,6 +362,12 @@ def _evaluate_state(scores):
             and names[2] in ("helper-select", "deck-select")):
         return S_HOME
 
+    # EVENT stable
+    if (top_name == "event" and top_score >= 0.8
+            and len(names) >= 2
+            and names[1] == "quest"):
+        return S_EVENT
+
     # QUEST stable
     if (top_name == "quest" and top_score >= 0.8
             and len(names) >= 2
@@ -315,17 +383,21 @@ def _evaluate_state(scores):
 
     # NORMAL-QUEST-UIJIN stable
     if (top_name == "normal-quest-uijin" and top_score >= 0.8
-            and _score_of(scores, "normal-quest") >= 0.8
+            and _score_of(scores, "normal-quest") >= 0.7
+            and _score_of(scores, "deck-select") >= 0.5
+            and _score_of(scores, "event") >= 0.45
+            and _score_of(scores, "quest") >= 0.45
             and len(names) >= 2
             and names[1] == "normal-quest"):
         return S_NORMAL_QUEST_UIJIN
 
     # NORMAL-QUEST-UIJIN-KARYU stable
-    if (top_name == "normal-quest-uijin-karyu" and top_score >= 0.8
-            and (_score_of(scores, "helper-select") >= 0.6
-                 or _score_of(scores, "deck-select") >= 0.6)
+    if (top_name == "normal-quest-uijin-karyu" and top_score >= 0.7
+            and (_score_of(scores, "helper-select") >= 0.5
+                 or _score_of(scores, "deck-select") >= 0.5
+                 or _score_of(scores, "normal-quest") >= 0.6)
             and len(names) >= 2
-            and names[1] in ("helper-select", "deck-select")):
+            and names[1] in ("helper-select", "deck-select", "normal-quest")):
         return S_NORMAL_QUEST_UIJIN_KARYU
 
     # HELPER-SELECT stable
@@ -355,9 +427,11 @@ def _evaluate_state(scores):
 
     # SPECIAL-REWARD stable
     if (top_name == "special-reward" and top_score >= 0.6
-            and _score_of(scores, "reward-next") >= 0.3
+            and (_score_of(scores, "reward-next") >= 0.3
             and all(s <= 0.2 for n, s in scores
-                    if n not in ("special-reward", "reward-next"))):
+                    if n not in ("special-reward", "reward-next")))
+            or (all(s <= 0.2 for n, s in scores
+                    if n not in ("special-reward")))):
         return S_SPECIAL_REWARD
 
     # REWARD-NEXT stable
@@ -386,6 +460,11 @@ def fsm_update(state, scores):
     global _fsm_pending, _fsm_pending_count
 
     candidate = _evaluate_state(scores)
+    if state == S_QUEST and candidate == S_NORMAL_QUEST_UIJIN:
+        candidate = S_NORMAL_QUEST
+    # candidate が現在と異なる場合だけログ出力
+    if candidate != state:
+        print(f"  [FSM] candidate={candidate} ({_fsm_pending_count}/{FSM_CONFIRM_COUNT})")
     if candidate == state:
         _fsm_pending = None
         _fsm_pending_count = 0
@@ -405,6 +484,7 @@ def fsm_update(state, scores):
         return state, False
 
     # candidate not allowed — reset pending
+    print(f"  [FSM] BLOCKED: {candidate} (allowed={allowed})")
     _fsm_pending = None
     _fsm_pending_count = 0
     return state, False
@@ -477,16 +557,20 @@ def draw_toast(display, text, elapsed):
     cv2.putText(display, text, (tx, ty), font, scale, faded, thickness)
 
 
-def draw_region_boxes(display, fsm_state):
-    """Draw sub-region rectangles for the current FSM state's scene only."""
+def draw_region_boxes(display, fsm_state, alpha=0.5):
+    """Draw sub-region rectangles with semi-transparent red fill."""
     scene_name = fsm_state.lower()
     regions = SCENE_REGIONS.get(scene_name, [])
+    if not regions:
+        return
+    overlay = display.copy()
     for rx, ry, rw, rh in regions:
         x1 = int(OUTPUT_W * rx)
         y1 = int(OUTPUT_H * ry)
         x2 = int(OUTPUT_W * (rx + rw))
         y2 = int(OUTPUT_H * (ry + rh))
-        cv2.rectangle(display, (x1, y1), (x2, y2), (255, 255, 0), 1)
+        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 255), -1)
+    cv2.addWeighted(overlay, alpha, display, 1.0 - alpha, 0, display)
 
 
 def make_roi_rect(frame_h, frame_w):
@@ -501,6 +585,31 @@ def make_roi_rect(frame_h, frame_w):
 # --------------- Main loop ---------------
 
 def main():
+    parser = argparse.ArgumentParser(description="Monster Strike scene detector")
+    parser.add_argument("--device-id",
+                        default=os.environ.get("DEVICE_ID", ""),
+                        help="SFU device ID for HID control (env: DEVICE_ID)")
+    parser.add_argument("--hid-w", type=int,
+                        default=int(os.environ.get("HID_W", "0")),
+                        help="HID screen width (env: HID_W)")
+    parser.add_argument("--hid-h", type=int,
+                        default=int(os.environ.get("HID_H", "0")),
+                        help="HID screen height (env: HID_H)")
+    args = parser.parse_args()
+
+    print(f"  [DEBUG] device_id='{args.device_id}' hid_w={args.hid_w} hid_h={args.hid_h}")
+    hid_enabled = bool(args.device_id and args.hid_w and args.hid_h)
+    hid_args = [str(args.hid_w), str(args.hid_h)]
+    print(f"  [DEBUG] hid_enabled={hid_enabled} hid_args={hid_args}")
+    if hid_enabled:
+        hid.init(args.device_id)
+        print(f"HID control enabled: device={args.device_id} "
+              f"size={args.hid_w}x{args.hid_h}")
+        print(f"  API: {hid.API_BASE}")
+    else:
+        print("HID control disabled "
+              "(set --device-id --hid-w --hid-h to enable)")
+
     print("Loading templates...")
     templates_hist, templates_region = load_templates(SAVE_DIR)
     if not templates_hist:
@@ -524,6 +633,8 @@ def main():
     fsm_state = S_UNKNOWN
     toast_text = ""
     toast_time = 0.0
+    last_play_turn = 0.0
+    PLAY_TURN_INTERVAL = 5.0
 
     try:
         while True:
@@ -546,6 +657,18 @@ def main():
                     print(f"  FSM -> {fsm_state}")
                     toast_text = fsm_state
                     toast_time = now
+                    print(f"  [DEBUG] hid_enabled={hid_enabled} fsm_state={fsm_state} "
+                          f"in_actions={fsm_state in FSM_ACTIONS}")
+                    if hid_enabled and fsm_state in FSM_ACTIONS:
+                        print(f"  [DEBUG] calling dispatch_action({FSM_ACTIONS[fsm_state]}, {hid_args})")
+                        dispatch_action(FSM_ACTIONS[fsm_state], hid_args)
+                    else:
+                        print(f"  [DEBUG] SKIPPED: hid_enabled={hid_enabled}")
+                # IN-PLAY: periodic play_turn (skip if busy)
+                if (hid_enabled and fsm_state == S_IN_PLAY
+                        and now - last_play_turn >= PLAY_TURN_INTERVAL):
+                    dispatch_if_idle("play_turn", hid_args)
+                    last_play_turn = now
                 # Debug: show base vs region for scenes with regions
                 for sname, sscore in scores[:3]:
                     if sname in templates_region:

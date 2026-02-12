@@ -51,8 +51,11 @@ def _api_url() -> str:
 
 def send(op: int, x: int, y: int, delay: float = MOVE_DELAY):
     """Send a single mouse report."""
+    url = _api_url()
     payload = {"type": "mouse", "command": f"{op} {x} {y}"}
-    requests.post(_api_url(), json=payload)
+    print(f"  [API] POST {url} {payload}")
+    resp = requests.post(url, json=payload)
+    print(f"  [API] -> {resp.status_code}")
     if delay > 0:
         time.sleep(delay)
 
@@ -321,7 +324,7 @@ def act_shojin_bt_click(args):
     calibrate(manual_size=(int(args[0]), int(args[1])))
 
     # scroll down to bottom
-    for s in range(1, 10):
+    for s in range(1, 4):
         reset_origin()
         print(f"[action] scroll down.. {s}")
         x1 = int(screen_w * 0.50)
@@ -369,7 +372,7 @@ def act_helper_select(args):
         return
     calibrate(manual_size=(int(args[0]), int(args[1])))
 
-    for step in range(1, 10):
+    for step in range(1, 4):
         reset_origin()
         print(f"[action] scroll up, reset.. {step}")
         x1 = int(screen_w * 0.50)
@@ -391,8 +394,8 @@ def act_helper_select(args):
     wait(1.0)
     # select helper
     reset_origin()
-    print("[action] tap helper (0.50, 0.60)")
-    click_pct(0.50, 0.60, repeat=1)
+    print("[action] tap helper (0.50, 0.46)")
+    click_pct(0.50, 0.46, repeat=1)
 
 
 @action("shutsugeki_bt_click")
@@ -457,6 +460,11 @@ def act_clear_ok(args):
     reset_origin()
     print("[action] tap OK (0.50, 0.65)")
     click_pct(0.50, 0.65, repeat=1)
+    wait(1.0)
+    reset_origin()
+    print("[action] tap helper (0.50, 0.75)")
+    click_pct(0.50, 0.78, repeat=1)
+    
 
 
 @action("special_reward")
@@ -480,7 +488,7 @@ def act_reward_next(args):
     calibrate(manual_size=(int(args[0]), int(args[1])))
     reset_origin()
     print("[action] tap reward next (0.50, 1.1)")
-    click_pct(0.50, 1.1, repeat=1)
+    click_pct(0.50, 0.999, repeat=1)
 
 
 if __name__ == "__main__":
