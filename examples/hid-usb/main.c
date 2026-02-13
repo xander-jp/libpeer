@@ -370,13 +370,29 @@ static void onmessage(char* msg, size_t len, void* user_data, uint16_t sid) {
         const cJSON* type = cJSON_GetObjectItemCaseSensitive(json, "type");
         const cJSON* command = cJSON_GetObjectItemCaseSensitive(json, "command");
 
-        if (cJSON_IsString(type) && strcmp(type->valuestring, "mouse") == 0 &&
-            cJSON_IsString(command) && command->valuestring[0] != '\0') {
-            queue_entry_t entry = {0};
-            entry.len = strlen(command->valuestring);
-            if (entry.len > QUEUE_ITEM_LEN) entry.len = QUEUE_ITEM_LEN;
-            memcpy(entry.data, command->valuestring, entry.len);
-            queue_try_add(&g_queue, &entry);
+        if (cJSON_IsString(type) && strcmp(type->valuestring, "mouse") == 0) {
+            // Single command (backward compatible)
+            if (cJSON_IsString(command) && command->valuestring[0] != '\0') {
+                queue_entry_t entry = {0};
+                entry.len = strlen(command->valuestring);
+                if (entry.len > QUEUE_ITEM_LEN) entry.len = QUEUE_ITEM_LEN;
+                memcpy(entry.data, command->valuestring, entry.len);
+                queue_try_add(&g_queue, &entry);
+            }
+            // Batch commands (array)
+            const cJSON* commands = cJSON_GetObjectItemCaseSensitive(json, "commands");
+            if (cJSON_IsArray(commands)) {
+                cJSON* cmd_item = NULL;
+                cJSON_ArrayForEach(cmd_item, commands) {
+                    if (cJSON_IsString(cmd_item) && cmd_item->valuestring[0] != '\0') {
+                        queue_entry_t entry = {0};
+                        entry.len = strlen(cmd_item->valuestring);
+                        if (entry.len > QUEUE_ITEM_LEN) entry.len = QUEUE_ITEM_LEN;
+                        memcpy(entry.data, cmd_item->valuestring, entry.len);
+                        queue_try_add(&g_queue, &entry);
+                    }
+                }
+            }
         } else {
             printf(" [JSON] unknown type=%s\n", cJSON_IsString(type) ? type->valuestring : "(null)");
         }

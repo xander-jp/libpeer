@@ -33,6 +33,12 @@ _cy = 0                 # tracked cursor y (HID units)
 
 RESET_SWEEP = 500       # HID units to guarantee reaching any corner
 
+# --------------- batch config (IPS/IDS evasion) ---------------
+BATCH_MIN = 6           # min commands per batch
+BATCH_MAX = 14          # max commands per batch
+PAD_MIN = 0             # min random padding length
+PAD_MAX = 32            # max random padding length
+
 
 # ============================================================
 #  Low-level API
@@ -57,18 +63,37 @@ def send(op: int, x: int, y: int, delay: float = MOVE_DELAY):
         time.sleep(delay)
 
 
+def _send_batch(commands: list):
+    """Send a batch of commands in one packet with random padding."""
+    pad = "x" * random.randint(PAD_MIN, PAD_MAX)
+    payload = {"type": "mouse", "commands": commands, "p": pad}
+    requests.post(_api_url(), json=payload)
+
+
 def _chunked_move(op: int, dx: int, dy: int):
-    """Move in MAX_DELTA chunks."""
+    """Move in MAX_DELTA chunks, sent as random-sized batches."""
     global _cx, _cy
     print(f"_chunked_move:  {dx}, {dy}\n")
+
+    # Collect all chunks first
+    chunks = []
     while dx != 0 or dy != 0:
         sx = max(-MAX_DELTA, min(MAX_DELTA, dx))
         sy = max(-MAX_DELTA, min(MAX_DELTA, dy))
-        send(op, sx, sy)
+        chunks.append(f"{op} {sx} {sy}")
         dx -= sx
         dy -= sy
         _cx += sx
         _cy += sy
+
+    # Send in random-sized batches
+    i = 0
+    while i < len(chunks):
+        n = random.randint(BATCH_MIN, BATCH_MAX)
+        batch = chunks[i:i + n]
+        _send_batch(batch)
+        i += len(batch)
+        time.sleep(MOVE_DELAY * len(batch))
 
 
 
@@ -81,8 +106,9 @@ def reset_origin():
     """Cursor to top-left (0,0) via large negative deltas."""
     global _cx, _cy
     steps = RESET_SWEEP // 100 + 1            # e.g. 500/100+1 = 6
-    for _ in range(steps):
-        send(0, -100, -100, delay=0.01)
+    cmds = [f"0 -100 -100" for _ in range(steps)]
+    _send_batch(cmds)
+    time.sleep(0.01 * steps)
     _cx = 0
     _cy = 0
 
@@ -95,14 +121,19 @@ def reset_origin_visual():
     """
     global _cx, _cy
     step = 20
-    # n_right = RESET_SWEEP // step + 1         # → bottom-right
     n_left = RESET_SWEEP // step + 1           # → top-left
-    # print(f"[reset_origin_visual] → bottom-right ({n_right} steps) ...")
-    # for _ in range(n_right):
-    #     send(0, step, step)
     print(f"[reset_origin_visual] → top-left origin ({n_left} steps) ...")
-    for _ in range(n_left):
-        send(0, -step, -step)
+
+    # Collect all commands, send in random batches
+    cmds = [f"0 {-step} {-step}" for _ in range(n_left)]
+    i = 0
+    while i < len(cmds):
+        n = random.randint(BATCH_MIN, BATCH_MAX)
+        batch = cmds[i:i + n]
+        _send_batch(batch)
+        i += len(batch)
+        time.sleep(MOVE_DELAY * len(batch))
+
     _cx = 0
     _cy = 0
     print("[reset_origin_visual] done")
@@ -146,12 +177,23 @@ def drag(x1, y1, x2, y2, steps: int = 20):
     move_to(x1, y1)
     send(1, 0, 0, delay=0.1)                 # mouse-down
 
+    # Collect intermediate drag commands
     dx = x2 - x1
     dy = y2 - y1
+    cmds = []
     for i in range(1, steps + 1):
         sx = (dx * i // steps) - (dx * (i - 1) // steps)
         sy = (dy * i // steps) - (dy * (i - 1) // steps)
-        send(1, sx, sy, delay=0.02)
+        cmds.append(f"1 {sx} {sy}")
+
+    # Send in random batches
+    i = 0
+    while i < len(cmds):
+        n = random.randint(BATCH_MIN, BATCH_MAX)
+        batch = cmds[i:i + n]
+        _send_batch(batch)
+        i += len(batch)
+        time.sleep(0.02 * len(batch))
 
     global _cx, _cy
     _cx = x2
