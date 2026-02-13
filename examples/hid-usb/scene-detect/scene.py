@@ -388,12 +388,12 @@ def _evaluate_state(scores):
 
     # NORMAL-QUEST-UIJIN stable
     if (top_name == "normal-quest-uijin" and top_score >= 0.8
-            and _score_of(scores, "normal-quest") >= 0.7
+            and _score_of(scores, "normal-quest") >= 0.5
             and _score_of(scores, "deck-select") >= 0.5
             and _score_of(scores, "event") >= 0.45
             and _score_of(scores, "quest") >= 0.45
             and len(names) >= 2
-            and names[1] == "normal-quest"):
+            and names[1] in ("normal-quest", "event")):
         return S_NORMAL_QUEST_UIJIN
 
     # NORMAL-QUEST-UIJIN-KARYU stable
@@ -402,7 +402,7 @@ def _evaluate_state(scores):
                  or _score_of(scores, "deck-select") >= 0.5
                  or _score_of(scores, "normal-quest") >= 0.6)
             and len(names) >= 2
-            and names[1] in ("helper-select", "deck-select", "normal-quest")):
+            and names[1] in ("helper-select", "deck-select", "normal-quest", "normal-quest-uijin")):
         return S_NORMAL_QUEST_UIJIN_KARYU
 
     # HELPER-SELECT stable
@@ -631,7 +631,18 @@ def main():
     time.sleep(0.5)
 
     print(f"Capture: {CAP_W}x{CAP_H}  ROI: ({ROI_X},{ROI_Y},{ROI_W},{ROI_H})  Output: {OUTPUT_W}x{OUTPUT_H}")
-    print("Keys: q=quit  s=save snapshot")
+    print("Keys: q=quit  s=save snapshot  m=click at cursor")
+
+    # Track mouse position for 'm' key click
+    _mouse_pos = [0, 0]
+
+    def on_mouse(event, x, y, flags, param):
+        if event == cv2.EVENT_MOUSEMOVE:
+            _mouse_pos[0] = x
+            _mouse_pos[1] = y
+
+    cv2.namedWindow("Scene Detect")
+    cv2.setMouseCallback("Scene Detect", on_mouse)
 
     frame_count = 0
     fps_time = time.monotonic()
@@ -642,6 +653,8 @@ def main():
     toast_time = 0.0
     last_play_turn = 0.0
     PLAY_TURN_INTERVAL = 5.0
+    last_reward_next = 0.0
+    REWARD_NEXT_INTERVAL = 10.0
 
     try:
         while True:
@@ -676,6 +689,11 @@ def main():
                         and now - last_play_turn >= PLAY_TURN_INTERVAL):
                     dispatch_if_idle("play_turn", hid_args)
                     last_play_turn = now
+                # REWARD-NEXT: periodic reward_next (skip if busy)
+                if (hid_enabled and fsm_state == S_REWARD_NEXT
+                        and now - last_reward_next >= REWARD_NEXT_INTERVAL):
+                    dispatch_if_idle("reward_next", hid_args)
+                    last_reward_next = now
                 # Debug: show base vs region for scenes with regions
                 for sname, sscore in scores[:3]:
                     if sname in templates_region:
@@ -731,6 +749,16 @@ def main():
             key = cv2.waitKey(1) & 0xFF
             if key == ord("q"):
                 break
+            elif key == ord("m"):
+                mx, my = _mouse_pos
+                if mx < OUTPUT_W and hid_enabled:
+                    xx = mx / OUTPUT_W
+                    yy = my / OUTPUT_H
+                    print(f"  [CLICK] pct({xx:.3f}, {yy:.3f})")
+                    def do_click(px=xx, py=yy):
+                        hid.calibrate(manual_size=(args.hid_w, args.hid_h))
+                        hid.click_pct(px, py, repeat=1)
+                    threading.Thread(target=do_click, daemon=True).start()
             elif key == ord("s"):
                 os.makedirs(SAVE_DIR, exist_ok=True)
                 default = f"snapshot_{int(time.time())}"

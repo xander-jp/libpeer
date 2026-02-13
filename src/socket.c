@@ -1,4 +1,5 @@
 #include <errno.h>
+#include <stdlib.h>
 #include <string.h>
 #include <unistd.h>
 
@@ -193,6 +194,11 @@ int udp_socket_add_multicast_group(UdpSocket* udp_socket, Address* mcast_addr) {
 #endif
 
 #ifdef __RP2040_BM__
+// Random ephemeral port range (IANA dynamic/private ports)
+#define EPHEMERAL_PORT_LO  49152
+#define EPHEMERAL_PORT_HI  65535
+#define EPHEMERAL_PORT_RETRIES 10
+
 int udp_socket_open(UdpSocket* udp_socket, int family, int port) {
     // RP2040: Use lwIP raw UDP API
     static Rp2040UdpSocket rp_sock;  // Static for now - single socket
@@ -212,10 +218,37 @@ int udp_socket_open(UdpSocket* udp_socket, int family, int port) {
     }
 
     err_t err;
-    if (family == AF_INET6) {
-        err = udp_bind(rp_sock.pcb, IP6_ADDR_ANY, port);
+    if (port == 0) {
+        // Randomize source port to avoid predictable ephemeral allocation
+        int retries;
+        for (retries = 0; retries < EPHEMERAL_PORT_RETRIES; retries++) {
+            port = EPHEMERAL_PORT_LO +
+                   (rand() % (EPHEMERAL_PORT_HI - EPHEMERAL_PORT_LO + 1));
+            if (family == AF_INET6) {
+                err = udp_bind(rp_sock.pcb, IP6_ADDR_ANY, port);
+            } else {
+                err = udp_bind(rp_sock.pcb, IP4_ADDR_ANY, port);
+            }
+            if (err == ERR_OK) {
+                LOGI("UDP bound to random ephemeral port %d", port);
+                break;
+            }
+        }
+        if (err != ERR_OK) {
+            // Fallback: let lwIP pick
+            port = 0;
+            if (family == AF_INET6) {
+                err = udp_bind(rp_sock.pcb, IP6_ADDR_ANY, 0);
+            } else {
+                err = udp_bind(rp_sock.pcb, IP4_ADDR_ANY, 0);
+            }
+        }
     } else {
-        err = udp_bind(rp_sock.pcb, IP4_ADDR_ANY, port);
+        if (family == AF_INET6) {
+            err = udp_bind(rp_sock.pcb, IP6_ADDR_ANY, port);
+        } else {
+            err = udp_bind(rp_sock.pcb, IP4_ADDR_ANY, port);
+        }
     }
 
     if (err != ERR_OK) {

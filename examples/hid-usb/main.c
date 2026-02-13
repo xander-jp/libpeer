@@ -1,4 +1,5 @@
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 #include <stdint.h>
 
@@ -68,7 +69,7 @@ enum {
 //=============================================================================
 // Queue (core1 -> core0, multicore-safe)
 //=============================================================================
-#define QUEUE_SIZE     32
+#define QUEUE_SIZE     128 
 #define QUEUE_ITEM_LEN 128
 
 typedef struct {
@@ -240,7 +241,19 @@ uint16_t const * tud_descriptor_string_cb(uint8_t index, uint16_t langid) {
 static PeerConnection* g_pc = NULL;
 static PeerConnectionState g_state = PEER_CONNECTION_NEW;
 static uint32_t g_dcmsg_time = 0;
+static uint32_t g_dcmsg_interval = 15000;  // keepAlive interval with jitter (ms)
 static int g_count = 0;
+
+#define KEEPALIVE_BASE_MS   15000   // 15 seconds
+#define KEEPALIVE_JITTER_PCT   20   // ±20% → 12000–18000 ms
+
+// Return randomized interval: base ± jitter%
+static uint32_t keepalive_jittered_interval(void) {
+    uint32_t jitter_range = KEEPALIVE_BASE_MS * KEEPALIVE_JITTER_PCT / 100;  // 3000
+    uint32_t lo = KEEPALIVE_BASE_MS - jitter_range;  // 12000
+    uint32_t hi = KEEPALIVE_BASE_MS + jitter_range;  // 18000
+    return lo + (rand() % (hi - lo + 1));
+}
 
 //=============================================================================
 // Timing measurement
@@ -631,10 +644,16 @@ static void core1_entry(void) {
         while (1) { sleep_ms(1000); }
     }
 
+    // Seed PRNG after WiFi init (board_millis provides entropy from boot timing)
+    // Must be before webrtc_init() so UDP socket gets a random ephemeral port
+    srand(board_millis());
+
     if (webrtc_init() != 0) {
         printf("core1: WebRTC init failed\n");
         while (1) { sleep_ms(1000); }
     }
+
+    g_dcmsg_interval = keepalive_jittered_interval();
 
     printf("core1: entering WebRTC loop\n");
 
@@ -644,8 +663,9 @@ static void core1_entry(void) {
         if (g_state == PEER_CONNECTION_COMPLETED) {
             now = board_millis();
 
-            if ((now - g_dcmsg_time) > 1000) {
+            if ((now - g_dcmsg_time) > g_dcmsg_interval) {
                 g_dcmsg_time = now;
+                g_dcmsg_interval = keepalive_jittered_interval();
                 char msg[64];
                 snprintf(msg, sizeof(msg), "datachannel message: %05d", g_count++);
                 peer_connection_datachannel_send(g_pc, msg, strlen(msg));
@@ -722,10 +742,6 @@ static void hid_task(void) {
     if (!queue_try_remove(&g_queue, &itm)) { return; }
     if (!itm.len) { return; }
 
-    printf("hid_task: %s (hid_ready=%d)\n", itm.data, tud_hid_ready());
-
-    // Message [0]: {"command":"x,y,z","type":"mouse"}
-
     int op = 0, dx = 0, dy = 0;
     int ret = sscanf(
         itm.data,
@@ -733,12 +749,7 @@ static void hid_task(void) {
         &op, &dx, &dy
     );
     if (ret == 3) {
-        printf("%d %d %d\n", op, dx, dy);
-        if (op || dx || dy) {
-            tud_hid_mouse_report(0, (int8_t)op, (int8_t)dx, (int8_t)dy, 0, 0);
-        } else if (!op && !dx && !dy) {
-            tud_hid_mouse_report(0, 0, 0, 0, 0, 0);
-        }
+        tud_hid_mouse_report(0, (int8_t)op, (int8_t)dx, (int8_t)dy, 0, 0);
     }
 }
 
