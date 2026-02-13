@@ -265,7 +265,7 @@ FSM_TRANSITIONS = {
                 S_NORMAL_QUEST_UIJIN_KARYU, S_HELPER_SELECT, S_DECK_SELECT,
                 S_IN_PLAY, S_CLEAR_OK, S_SPECIAL_REWARD, S_REWARD_NEXT],
     S_HOME:                     [S_EVENT, S_QUEST, S_NORMAL_QUEST_UIJIN],
-    S_EVENT:                    [S_NORMAL_QUEST_UIJIN, S_HOME],
+    S_EVENT:                    [S_QUEST, S_NORMAL_QUEST_UIJIN, S_HOME],
     S_QUEST:                    [S_NORMAL_QUEST, S_HOME],
     S_NORMAL_QUEST:             [S_NORMAL_QUEST_UIJIN, S_QUEST, S_HOME],
     S_NORMAL_QUEST_UIJIN:      [S_NORMAL_QUEST_UIJIN_KARYU, S_NORMAL_QUEST, S_HOME],
@@ -353,6 +353,11 @@ def _evaluate_state(scores):
         return S_UNKNOWN
 
     top_name, top_score = scores[0]
+
+    # Guard: nothing looks similar enough
+    if top_score < MIN_SIMILARITY:
+        return S_UNKNOWN
+
     names = _top_names(scores, 3)
 
     # HOME stable
@@ -443,6 +448,8 @@ def _evaluate_state(scores):
 
     return S_UNKNOWN
 
+
+MIN_SIMILARITY = 0.4  # below this, top match is treated as UNKNOWN
 
 _fsm_pending = None   # candidate state awaiting confirmation
 _fsm_pending_count = 0  # consecutive times candidate has been seen
@@ -702,8 +709,12 @@ def main():
                         cv2.FONT_HERSHEY_SIMPLEX, 0.8, (0, 255, 0), 2)
             if scores:
                 top = scores[0]
-                cv2.putText(display, f"{top[0]} ({top[1]:.3f})", (10, 60),
-                            cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
+                if top[1] < MIN_SIMILARITY:
+                    cv2.putText(display, f"-- ({top[1]:.3f})", (10, 60),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (100, 100, 100), 2)
+                else:
+                    cv2.putText(display, f"{top[0]} ({top[1]:.3f})", (10, 60),
+                                cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             cv2.putText(display, f"FSM: {fsm_state}", (10, 90),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
             draw_region_boxes(display, fsm_state)

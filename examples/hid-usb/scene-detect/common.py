@@ -30,6 +30,7 @@ screen_w = 0            # screen width  (HID units)
 screen_h = 0            # screen height (HID units)
 _cx = 0                 # tracked cursor x (HID units)
 _cy = 0                 # tracked cursor y (HID units)
+_seq = 0                # packet sequence number (IPS/IDS evasion)
 
 RESET_SWEEP = 500       # HID units to guarantee reaching any corner
 
@@ -57,8 +58,10 @@ def _api_url() -> str:
 
 def send(op: int, x: int, y: int, delay: float = MOVE_DELAY):
     """Send a single mouse report."""
+    global _seq
+    _seq += 1
     url = _api_url()
-    payload = {"type": "mouse", "command": f"{op} {x} {y}"}
+    payload = {"type": "mouse", "command": f"{op} {x} {y}", "seq": f"{_seq}"}
     print(f"  [API] POST {url} {payload}")
     resp = requests.post(url, json=payload)
     print(f"  [API] -> {resp.status_code}")
