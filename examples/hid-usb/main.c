@@ -15,6 +15,7 @@
 #include "pico/multicore.h"
 #include "hardware/resets.h"
 #include "hardware/structs/usb.h"
+#include "hardware/watchdog.h"
 
 
 #include "peer.h"
@@ -247,6 +248,7 @@ static int g_count = 0;
 #define KEEPALIVE_BASE_MS   15000   // 15 seconds
 #define KEEPALIVE_JITTER_PCT   20   // ±20% → 12000–18000 ms
 
+
 // Return randomized interval: base ± jitter%
 static uint32_t keepalive_jittered_interval(void) {
     uint32_t jitter_range = KEEPALIVE_BASE_MS * KEEPALIVE_JITTER_PCT / 100;  // 3000
@@ -345,6 +347,14 @@ static void onconnectionstatechange(PeerConnectionState state, void* data) {
         case PEER_CONNECTION_COMPLETED:
             g_time_ice_completed = now;
             printf("[TIMING] ICE completed: %lu ms\n", (unsigned long)now);
+            break;
+        case PEER_CONNECTION_FAILED:
+        case PEER_CONNECTION_DISCONNECTED:
+            printf("[REBOOT] PeerConnection %s at %lu ms — rebooting in 1s\n",
+                   peer_connection_state_to_string(state), (unsigned long)now);
+            sleep_ms(1000);
+            watchdog_reboot(0, 0, 0);
+            while (1) tight_loop_contents();  // wait for watchdog reset
             break;
         default:
             break;
