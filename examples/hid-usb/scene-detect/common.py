@@ -111,10 +111,16 @@ def _chunked_move(op: int, dx: int, dy: int):
 #  High-level operations
 # ============================================================
 
+def _sweep_distance():
+    """Return sweep distance that guarantees reaching the corner."""
+    return max(RESET_SWEEP, screen_w, screen_h)
+
+
 def reset_origin():
     """Cursor to top-left (0,0) via large negative deltas."""
     global _cx, _cy
-    steps = RESET_SWEEP // 100 + 1            # e.g. 500/100+1 = 6
+    sweep = _sweep_distance()
+    steps = sweep // 100 + 1
     cmds = [f"0 -100 -100" for _ in range(steps)]
     _send_batch(cmds)
     time.sleep(0.01 * steps)
@@ -129,9 +135,10 @@ def reset_origin_visual():
     then sweep far left/up to guarantee reaching (0,0).
     """
     global _cx, _cy
+    sweep = _sweep_distance()
     step = 20
-    n_left = RESET_SWEEP // step + 1           # → top-left
-    print(f"[reset_origin_visual] → top-left origin ({n_left} steps) ...")
+    n_left = sweep // step + 1
+    print(f"[reset_origin_visual] → top-left origin ({n_left} steps, sweep={sweep}) ...")
 
     # Collect all commands, send in random batches
     cmds = [f"0 {-step} {-step}" for _ in range(n_left)]
@@ -384,8 +391,8 @@ def act_shojin_bt_click(args):
 
     # tap 初陣
     reset_origin()
-    print("[action] tap 初陣 (0.50, 0.90)")
-    click_pct(0.50, 0.90, repeat=1)
+    print("[action] tap 初陣 (0.50, 0.86)")
+    click_pct(0.50, 0.86, repeat=1)
 
 
 @action("karyu_bt_click")
@@ -454,8 +461,8 @@ def act_shutsugeki_bt_click(args):
         return
     calibrate(manual_size=(int(args[0]), int(args[1])))
     reset_origin()
-    print("[action] tap 出撃 (0.50, 0.70)")
-    click_pct(0.50, 0.70, repeat=1)
+    print("[action] tap 出撃 (0.50, 0.67)")
+    click_pct(0.50, 0.67, repeat=1)
 
 
 @action("play_turn")
@@ -506,12 +513,8 @@ def act_clear_ok(args):
         return
     calibrate(manual_size=(int(args[0]), int(args[1])))
     reset_origin()
-    print("[action] tap OK (0.50, 0.65)")
-    click_pct(0.50, 0.65, repeat=1)
-    wait(1.0)
-    reset_origin()
-    print("[action] tap helper (0.50, 0.75)")
-    click_pct(0.50, 0.78, repeat=1)
+    print("[action] tap OK (0.50, 0.63)")
+    click_pct(0.50, 0.63, repeat=1)
     
 
 
@@ -535,8 +538,8 @@ def act_reward_next(args):
         return
     calibrate(manual_size=(int(args[0]), int(args[1])))
     reset_origin()
-    print("[action] tap reward next (0.50, 1.1)")
-    click_pct(0.50, 0.999, repeat=1)
+    print("[action] tap reward next (0.50, 0.98)")
+    click_pct(0.50, 0.98, repeat=1)
 
 
 if __name__ == "__main__":

@@ -9,13 +9,27 @@ import queue
 import threading
 import time
 
+import json
+
 import cv2
 import numpy as np
 from picamera2 import Picamera2
 
+try:
+    import onnxruntime as ort
+    HAS_ORT = True
+except ImportError:
+    HAS_ORT = False
+
 import common as hid
 
 SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots")
+ONNX_MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scene_model.onnx")
+ONNX_LABELS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scene_labels.json")
+
+# ONNX input size (must match train_onnx.py)
+ONNX_INPUT_W = 32
+ONNX_INPUT_H = 64
 
 # --- ROI config (matches: rpicam-still --roi 0.40,0.15,0.20,0.55) ---
 ROI_X = 0.442   # left offset (normalized)
@@ -95,28 +109,22 @@ SCENE_REGIONS = {
     ],
     
     "reward-next": [
-        (0.01, 0.91, 0.98, 0.07),  # ok button
+        (0.01, 0.906, 0.98, 0.07),  # ok button
+    ],
+    "need-download": [
+        (0.04, 0.534, 0.92, 0.069),
+    ],
+    "tutorial-yujo-combo": [
+        (0.04, 0.534, 0.92, 0.069),
+    ],
+    "tutorial-boss-attack": [
+        (0.04, 0.534, 0.92, 0.069),
+    ],
+    "clear-ok": [
+        (0.04, 0.534, 0.92, 0.069),
     ],
     
-}
-
-# --- Custom differential for disambiguating similar scenes ---
-# key_region: the button index that should be dominant for this scene
-# other_regions: the other button indices to compare against (avg)
-# Rule: if r[key] > avg(r[others]) → boost, otherwise → penalise
-SCENE_CUSTOMS = {
-    "quest": {
-        "rival": "event",
-        "key_region": 0,          # r0 (left button) biggest → quest
-        "other_regions": [1, 2],
-        "weight": 0.5,
-    },
-    "event": {
-        "rival": "quest",
-        "key_region": 1,          # r1 (middle button) biggest → event
-        "other_regions": [0, 2],
-        "weight": 0.5,
-    },
+    
 }
 
 
@@ -176,6 +184,91 @@ def load_templates(snapshot_dir):
     return templates_hist, templates_region
 
 
+# --------------- ONNX inference ---------------
+
+def load_onnx_model(model_path, labels_path):
+    """Load ONNX model and label list.
+
+    Returns (session, labels) or (None, None) on failure.
+    """
+    if not HAS_ORT:
+        print("  onnxruntime not available, falling back to histogram mode")
+        return None, None
+    if not os.path.exists(model_path):
+        print(f"  ONNX model not found: {model_path}")
+        print("  Run: python3 train_onnx.py   to generate it")
+        return None, None
+    if not os.path.exists(labels_path):
+        print(f"  ONNX labels not found: {labels_path}")
+        return None, None
+
+    sess = ort.InferenceSession(model_path)
+    with open(labels_path) as f:
+        labels = json.load(f)
+    print(f"  ONNX model loaded: {model_path} ({len(labels)} classes)")
+    return sess, labels
+
+
+def onnx_preprocess(frame):
+    """Preprocess frame for ONNX inference. Returns [1, N_FEATURES] float32."""
+    resized = cv2.resize(frame, (ONNX_INPUT_W, ONNX_INPUT_H))
+    vec = resized.astype(np.float32).flatten() / 255.0
+    return vec.reshape(1, -1)
+
+
+# --- Stage 2: sub-region boost/penalty weights ---
+REGION_BOOST = 0.10    # max positive adjustment per matching region
+REGION_PENALTY = 0.15  # max negative adjustment per mismatching region
+REGION_MATCH_THR = 0.5 # histogram correlation above this = positive
+REGION_TOP_N = 3       # apply stage-2 to top-N candidates only
+
+
+def onnx_classify(frame, session, labels, templates_region=None):
+    """Two-stage scene classification.
+
+    Stage 1: ONNX full-frame inference → base probabilities
+    Stage 2: For top candidates with SCENE_REGIONS, compare each
+             sub-region crop against stored template histograms.
+             Positive match → boost score.  Mismatch → penalise.
+    Returns [(scene_name, score), ...] sorted desc.
+    """
+    # --- Stage 1: ONNX ---
+    features = onnx_preprocess(frame)
+    probs = session.run(None, {"input": features})[0][0]
+    score_map = {labels[i]: float(probs[i]) for i in range(len(labels))}
+
+    # --- Stage 2: sub-region template matching ---
+    if templates_region:
+        # Sort to find top-N for region check
+        ranked = sorted(score_map.items(), key=lambda x: x[1], reverse=True)
+        for name, base_score in ranked[:REGION_TOP_N]:
+            if name not in templates_region or name not in SCENE_REGIONS:
+                continue
+            regions = SCENE_REGIONS[name]
+            n_regions = len(regions)
+            if n_regions == 0:
+                continue
+
+            adjustments = []
+            for ri, region in enumerate(regions):
+                frame_crop = crop_region(frame, region)
+                frame_crop_hist = calc_hist(frame_crop)
+                best_corr = max(
+                    cv2.compareHist(frame_crop_hist, h, cv2.HISTCMP_CORREL)
+                    for h in templates_region[name][ri]
+                )
+                if best_corr >= REGION_MATCH_THR:
+                    adjustments.append(+REGION_BOOST * best_corr)
+                else:
+                    adjustments.append(-REGION_PENALTY * (REGION_MATCH_THR - best_corr))
+
+            adj = sum(adjustments) / n_regions
+            score_map[name] = max(0.0, min(1.0, base_score + adj))
+
+    results = sorted(score_map.items(), key=lambda x: x[1], reverse=True)
+    return results
+
+
 def scene_similarity(frame, templates_hist, templates_region):
     """Compare frame against all scene templates.
 
@@ -204,38 +297,16 @@ def scene_similarity(frame, templates_hist, templates_region):
             # Compare avg of regions (excluding last = home bar) vs base
             content_regions = region_scores[:-1] if len(region_scores) > 1 else region_scores
             avg_content = sum(content_regions) / len(content_regions)
-            diff = avg_content - base
-            if diff >= 0:
-                # Positive: regions match better than base → boost
+            if avg_content >= base:
+                # Regions match better than base → boost (trust regions)
                 score = 0.15 * base + 0.85 * avg_content
             else:
-                # Negative: regions match worse than base → penalise (log curve)
-                score = base - 0.70 * math.log(1.0 + abs(diff))
+                # Regions match worse → penalise but trust base (preserves ordering)
+                score = 0.70 * base + 0.30 * avg_content
         else:
             score = base
 
         score_map[name] = score
-
-    # Apply SCENE_CUSTOMS: boost scene whose key_region > avg(other_regions)
-    for name, custom in SCENE_CUSTOMS.items():
-        rival = custom["rival"]
-        if name not in score_map or rival not in score_map:
-            continue
-        if name not in region_map:
-            continue
-        rs = region_map[name]
-        key_idx = custom["key_region"]
-        other_idxs = custom["other_regions"]
-        key_score = rs[key_idx]
-        other_avg = sum(rs[i] for i in other_idxs) / len(other_idxs)
-        diff = key_score - other_avg
-        before = score_map[name]
-        delta = custom["weight"] * diff
-        score_map[name] += delta
-        # print(f"  CUSTOM[{name}] r{key_idx}={key_score:.3f} "
-        #       f"avg({','.join(f'r{i}' for i in other_idxs)})={other_avg:.3f} "
-        #       f"diff={diff:+.4f} delta={delta:+.4f}  "
-        #       f"{before:.4f}->{score_map[name]:.4f}")
 
     results = sorted(score_map.items(), key=lambda x: x[1], reverse=True)
     return results
@@ -256,6 +327,9 @@ S_IN_PLAY = "NORMAL-QUEST-UIJIN-IN-PLAY"
 S_CLEAR_OK = "CLEAR-OK"
 S_SPECIAL_REWARD = "SPECIAL-REWARD"
 S_EVENT = "EVENT"
+S_NEED_DOWNLOAD = "NEED-DOWNLOAD"
+S_TUTORIAL_YUJO_COMBO = "TUTORIAL-YUJO-COMBO"
+S_TUTORIAL_BOSS_ATTACK = "TUTORIAL-BOSS-ATTACK"
 S_REWARD_NEXT = "REWARD-NEXT"
 
 # --- FSM transition table ---
@@ -263,7 +337,8 @@ S_REWARD_NEXT = "REWARD-NEXT"
 FSM_TRANSITIONS = {
     S_UNKNOWN: [S_HOME, S_EVENT, S_QUEST, S_NORMAL_QUEST, S_NORMAL_QUEST_UIJIN,
                 S_NORMAL_QUEST_UIJIN_KARYU, S_HELPER_SELECT, S_DECK_SELECT,
-                S_IN_PLAY, S_CLEAR_OK, S_SPECIAL_REWARD, S_REWARD_NEXT],
+                S_IN_PLAY, S_CLEAR_OK, S_SPECIAL_REWARD, S_REWARD_NEXT,
+                S_NEED_DOWNLOAD, S_TUTORIAL_YUJO_COMBO, S_TUTORIAL_BOSS_ATTACK],
     S_HOME:                     [S_EVENT, S_QUEST, S_NORMAL_QUEST_UIJIN],
     S_EVENT:                    [S_QUEST, S_NORMAL_QUEST_UIJIN, S_HOME],
     S_QUEST:                    [S_NORMAL_QUEST, S_HOME],
@@ -271,8 +346,11 @@ FSM_TRANSITIONS = {
     S_NORMAL_QUEST_UIJIN:      [S_NORMAL_QUEST_UIJIN_KARYU, S_NORMAL_QUEST, S_HOME],
     S_NORMAL_QUEST_UIJIN_KARYU:[S_HELPER_SELECT, S_HOME],
     S_HELPER_SELECT:            [S_DECK_SELECT, S_HOME],
-    S_DECK_SELECT:              [S_IN_PLAY, S_HOME],
-    S_IN_PLAY:                  [S_CLEAR_OK],
+    S_DECK_SELECT:              [S_IN_PLAY, S_NEED_DOWNLOAD, S_HOME],
+    S_NEED_DOWNLOAD:            [S_IN_PLAY, S_HOME],
+    S_IN_PLAY:                  [S_CLEAR_OK, S_TUTORIAL_YUJO_COMBO, S_TUTORIAL_BOSS_ATTACK],
+    S_TUTORIAL_YUJO_COMBO:      [S_IN_PLAY],
+    S_TUTORIAL_BOSS_ATTACK:     [S_IN_PLAY],
     S_CLEAR_OK:                 [S_SPECIAL_REWARD, S_REWARD_NEXT, S_HOME],
     S_SPECIAL_REWARD:           [S_REWARD_NEXT],
     S_REWARD_NEXT:              [S_HOME],
@@ -290,6 +368,9 @@ FSM_ACTIONS = {
     S_HELPER_SELECT:            "helper_select",
     S_DECK_SELECT:              "shutsugeki_bt_click",
     S_IN_PLAY:                  "play_turn",
+    S_NEED_DOWNLOAD:            "need_download_ok",
+    S_TUTORIAL_YUJO_COMBO:      "tutorial_yujo_combo_ok",
+    S_TUTORIAL_BOSS_ATTACK:     "tutorial_boss_attack_ok",
     S_CLEAR_OK:                 "clear_ok",
     S_SPECIAL_REWARD:           "special_reward",
     S_REWARD_NEXT:              "reward_next",
@@ -347,8 +428,62 @@ def _top_names(scores, n):
     return [name for name, _ in scores[:n]]
 
 
-def _evaluate_state(scores):
-    """Determine which state the scores indicate, ignoring transitions."""
+_SCENE_NAME_TO_STATE = {
+    "home": S_HOME,
+    "event": S_EVENT,
+    "quest": S_QUEST,
+    "normal-quest": S_NORMAL_QUEST,
+    "normal-quest-uijin": S_NORMAL_QUEST_UIJIN,
+    "normal-quest-uijin-karyu": S_NORMAL_QUEST_UIJIN_KARYU,
+    "helper-select": S_HELPER_SELECT,
+    "deck-select": S_DECK_SELECT,
+    "normal-quest-uijin-in-play": S_IN_PLAY,
+    "need-download": S_NEED_DOWNLOAD,
+    "tutorial-yujo-combo": S_TUTORIAL_YUJO_COMBO,
+    "tutorial-boss-attack": S_TUTORIAL_BOSS_ATTACK,
+    "clear-ok": S_CLEAR_OK,
+    "special-reward": S_SPECIAL_REWARD,
+    "reward-next": S_REWARD_NEXT,
+}
+
+# --- Histogram mode (legacy) thresholds ---
+MIN_SIMILARITY = 0.4
+
+# --- ONNX mode thresholds ---
+ONNX_CONF_HIGH = 0.60   # confident: accept directly
+ONNX_CONF_LOW = 0.30    # below this: UNKNOWN
+
+
+def _evaluate_state_onnx(scores):
+    """Evaluate state from ONNX softmax probabilities."""
+    if not scores:
+        return S_UNKNOWN
+
+    top_name, top_score = scores[0]
+
+    # "unknown" class → UNKNOWN regardless of confidence
+    if top_name == "unknown":
+        return S_UNKNOWN
+
+    if top_score < ONNX_CONF_LOW:
+        return S_UNKNOWN
+
+    # High confidence: trust the model
+    if top_score >= ONNX_CONF_HIGH:
+        return _SCENE_NAME_TO_STATE.get(top_name, S_UNKNOWN)
+
+    # Medium confidence: require margin over second place
+    if len(scores) >= 2:
+        second_score = scores[1][1]
+        margin = top_score - second_score
+        if margin >= 0.15:
+            return _SCENE_NAME_TO_STATE.get(top_name, S_UNKNOWN)
+
+    return S_UNKNOWN
+
+
+def _evaluate_state_hist(scores):
+    """Evaluate state from histogram correlation scores (legacy)."""
     if not scores:
         return S_UNKNOWN
 
@@ -363,8 +498,8 @@ def _evaluate_state(scores):
     # HOME stable
     if (top_name == "home" and top_score >= 0.8
             and len(names) >= 3
-            and names[1] == "clear-ok"
-            and names[2] in ("helper-select", "deck-select")):
+            and names[1] in ("helper-select", "deck-select", "clear-ok")
+            and names[2] in ("helper-select", "deck-select", "clear-ok")):
         return S_HOME
 
     # EVENT stable
@@ -406,19 +541,12 @@ def _evaluate_state(scores):
         return S_NORMAL_QUEST_UIJIN_KARYU
 
     # HELPER-SELECT stable
-    if (top_name == "helper-select" and top_score >= 0.8
-            and _score_of(scores, "clear-ok") >= 0.6
-            and _score_of(scores, "deck-select") >= 0.6
-            and len(names) >= 2
-            and names[1] in ("clear-ok", "deck-select")):
+    if (top_name == "helper-select" and top_score >= 0.8):
         return S_HELPER_SELECT
 
     # DECK-SELECT stable
     if (top_name == "deck-select" and top_score >= 0.8
-            and (_score_of(scores, "event") >= 0.6
-                 or _score_of(scores, "quest") >= 0.6)
-            and len(names) >= 2
-            and names[1] in ("event", "quest")):
+            and (_score_of(scores, "normal-quest-uijin") >= 0.6)):
         return S_DECK_SELECT
 
     # NORMAL-QUEST-UIJIN-IN-PLAY stable
@@ -431,7 +559,7 @@ def _evaluate_state(scores):
         return S_CLEAR_OK
 
     # SPECIAL-REWARD stable
-    if (top_name == "special-reward" and top_score >= 0.6
+    if (top_name == "special-reward" and top_score >= 0.8
             and (_score_of(scores, "reward-next") >= 0.3
             and all(s <= 0.2 for n, s in scores
                     if n not in ("special-reward", "reward-next")))
@@ -440,20 +568,26 @@ def _evaluate_state(scores):
         return S_SPECIAL_REWARD
 
     # REWARD-NEXT stable
-    if (top_name == "reward-next" and top_score >= 0.6
-            and _score_of(scores, "special-reward") < 0.6
+    if (top_name == "reward-next" and top_score >= 0.8
             and all(s < 0.3 for n, s in scores
                     if n not in ("reward-next", "special-reward"))):
         return S_REWARD_NEXT
 
     return S_UNKNOWN
 
-
-MIN_SIMILARITY = 0.4  # below this, top match is treated as UNKNOWN
-
 _fsm_pending = None   # candidate state awaiting confirmation
 _fsm_pending_count = 0  # consecutive times candidate has been seen
 FSM_CONFIRM_COUNT = 3   # required consecutive hits before transition
+
+# Global: which evaluator to use (set in main)
+_use_onnx_evaluator = False
+
+
+def _evaluate_state(scores):
+    """Dispatch to ONNX or histogram evaluator."""
+    if _use_onnx_evaluator:
+        return _evaluate_state_onnx(scores)
+    return _evaluate_state_hist(scores)
 
 
 def fsm_update(state, scores):
@@ -469,7 +603,7 @@ def fsm_update(state, scores):
     candidate = _evaluate_state(scores)
     if state == S_QUEST and candidate == S_NORMAL_QUEST_UIJIN:
         candidate = S_NORMAL_QUEST
-    # candidate が現在と異なる場合だけログ出力
+    # output logging when difference candidate
     if candidate != state:
         print(f"  [FSM] candidate={candidate} ({_fsm_pending_count}/{FSM_CONFIRM_COUNT})")
     if candidate == state:
@@ -564,20 +698,31 @@ def draw_toast(display, text, elapsed):
     cv2.putText(display, text, (tx, ty), font, scale, faded, thickness)
 
 
-def draw_region_boxes(display, fsm_state, alpha=0.5):
-    """Draw sub-region rectangles with semi-transparent red fill."""
-    scene_name = fsm_state.lower()
-    regions = SCENE_REGIONS.get(scene_name, [])
-    if not regions:
-        return
-    overlay = display.copy()
-    for rx, ry, rw, rh in regions:
-        x1 = int(OUTPUT_W * rx)
-        y1 = int(OUTPUT_H * ry)
-        x2 = int(OUTPUT_W * (rx + rw))
-        y2 = int(OUTPUT_H * (ry + rh))
-        cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 255), -1)
-    cv2.addWeighted(overlay, alpha, display, 1.0 - alpha, 0, display)
+def draw_region_boxes(display, fsm_state, candidate_scene=None, alpha=0.5):
+    """Draw sub-region rectangles for FSM state (red fill) and candidate (green border)."""
+    # Layer 1: current FSM state → red fill, 50% alpha
+    fsm_name = fsm_state.lower()
+    fsm_regions = SCENE_REGIONS.get(fsm_name, [])
+    if fsm_regions:
+        overlay = display.copy()
+        for rx, ry, rw, rh in fsm_regions:
+            x1 = int(OUTPUT_W * rx)
+            y1 = int(OUTPUT_H * ry)
+            x2 = int(OUTPUT_W * (rx + rw))
+            y2 = int(OUTPUT_H * (ry + rh))
+            cv2.rectangle(overlay, (x1, y1), (x2, y2), (0, 0, 255), -1)
+        cv2.addWeighted(overlay, alpha, display, 1.0 - alpha, 0, display)
+
+    # Layer 2: candidate (detected) scene → green border, no fill
+    if candidate_scene:
+        cand_name = candidate_scene.lower()
+        cand_regions = SCENE_REGIONS.get(cand_name, [])
+        for rx, ry, rw, rh in cand_regions:
+            x1 = int(OUTPUT_W * rx)
+            y1 = int(OUTPUT_H * ry)
+            x2 = int(OUTPUT_W * (rx + rw))
+            y2 = int(OUTPUT_H * (ry + rh))
+            cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
 
 
 def make_roi_rect(frame_h, frame_w):
@@ -617,9 +762,23 @@ def main():
         print("HID control disabled "
               "(set --device-id --hid-w --hid-h to enable)")
 
+    # --- Try ONNX model first, fall back to histogram ---
+    print("Loading ONNX model...")
+    onnx_session, onnx_labels = load_onnx_model(ONNX_MODEL_PATH, ONNX_LABELS_PATH)
+    use_onnx = onnx_session is not None
+
+    global _use_onnx_evaluator
+    _use_onnx_evaluator = use_onnx
+
     print("Loading templates...")
     templates_hist, templates_region = load_templates(SAVE_DIR)
-    if not templates_hist:
+    if use_onnx:
+        print(f"Using ONNX + sub-region pipeline ({len(onnx_labels)} classes, "
+              f"{len(templates_region)} scenes with regions)")
+    else:
+        print("Falling back to histogram-only mode")
+
+    if not use_onnx and not templates_hist:
         print(f"WARNING: no templates found in {SAVE_DIR}")
 
     picam2 = Picamera2()
@@ -653,8 +812,6 @@ def main():
     toast_time = 0.0
     last_play_turn = 0.0
     PLAY_TURN_INTERVAL = 5.0
-    last_reward_next = 0.0
-    REWARD_NEXT_INTERVAL = 10.0
 
     try:
         while True:
@@ -668,8 +825,13 @@ def main():
 
             # --- Scene detection (1Hz) ---
             now = time.monotonic()
-            if templates_hist and now - last_detect >= 1.0:
-                scores = scene_similarity(roi_resized, templates_hist, templates_region)
+            detect_ready = now - last_detect >= 1.0
+            if detect_ready and (use_onnx or templates_hist):
+                if use_onnx:
+                    scores = onnx_classify(roi_resized, onnx_session, onnx_labels,
+                                           templates_region)
+                else:
+                    scores = scene_similarity(roi_resized, templates_hist, templates_region)
                 last_detect = now
                 # FSM update
                 fsm_state, fsm_changed = fsm_update(fsm_state, scores)
@@ -689,14 +851,9 @@ def main():
                         and now - last_play_turn >= PLAY_TURN_INTERVAL):
                     dispatch_if_idle("play_turn", hid_args)
                     last_play_turn = now
-                # REWARD-NEXT: periodic reward_next (skip if busy)
-                if (hid_enabled and fsm_state == S_REWARD_NEXT
-                        and now - last_reward_next >= REWARD_NEXT_INTERVAL):
-                    dispatch_if_idle("reward_next", hid_args)
-                    last_reward_next = now
-                # Debug: show base vs region for scenes with regions
+                # Debug: show top scores
                 for sname, sscore in scores[:3]:
-                    if sname in templates_region:
+                    if not use_onnx and sname in templates_region:
                         frame_hist = calc_hist(roi_resized)
                         base = max(cv2.compareHist(frame_hist, h, cv2.HISTCMP_CORREL)
                                    for h in templates_hist[sname])
@@ -710,7 +867,7 @@ def main():
                         rs_str = " ".join(f"r{i}={v:.3f}" for i, v in enumerate(rs))
                         print(f"  [{sname}] base={base:.3f} {rs_str} -> {sscore:.3f}")
                     else:
-                        print(f"  [{sname}] base={sscore:.3f}")
+                        print(f"  [{sname}] {sscore:.3f}")
 
             # --- FPS ---
             frame_count += 1
@@ -735,7 +892,8 @@ def main():
                                 cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 255, 255), 2)
             cv2.putText(display, f"FSM: {fsm_state}", (10, 90),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.7, (0, 200, 255), 2)
-            draw_region_boxes(display, fsm_state)
+            candidate_scene = scores[0][0] if scores and scores[0][1] >= MIN_SIMILARITY else None
+            draw_region_boxes(display, fsm_state, candidate_scene=candidate_scene)
             if toast_text:
                 draw_toast(display, toast_text, now - toast_time)
                 if now - toast_time >= TOAST_DURATION:

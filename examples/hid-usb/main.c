@@ -743,10 +743,10 @@ int main() {
 
 static void hid_task(void) {
     queue_entry_t itm;
-    static uint32_t start_ms = 0;
-    uint32_t now = board_millis();
-    if ((now - start_ms) < 10) { return; }
-    start_ms = now;
+    // static uint32_t start_ms = 0;
+    // uint32_t now = board_millis();
+    // if ((now - start_ms) < 10) { return; }
+    // start_ms = now;
     if (!tud_mounted()) { return; }
     if (!tud_hid_ready()) { return; }
     if (!queue_try_remove(&g_queue, &itm)) { return; }
