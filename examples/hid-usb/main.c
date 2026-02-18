@@ -350,11 +350,12 @@ static void onconnectionstatechange(PeerConnectionState state, void* data) {
             break;
         case PEER_CONNECTION_FAILED:
         case PEER_CONNECTION_DISCONNECTED:
-            printf("[REBOOT] PeerConnection %s at %lu ms — rebooting in 1s\n",
+            printf("[WARN] PeerConnection %s at %lu ms — NOT rebooting (debug mode)\n",
                    peer_connection_state_to_string(state), (unsigned long)now);
-            sleep_ms(1000);
-            watchdog_reboot(0, 0, 0);
-            while (1) tight_loop_contents();  // wait for watchdog reset
+            // Reboot disabled for debugging:
+            // sleep_ms(1000);
+            // watchdog_reboot(0, 0, 0);
+            // while (1) tight_loop_contents();
             break;
         default:
             break;
