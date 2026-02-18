@@ -23,3 +23,8 @@ _build/
 *.sln
 *.slnx
 mono_crash.*.json
+
+
+__pycache__
+
+

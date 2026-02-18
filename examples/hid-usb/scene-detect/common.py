@@ -10,14 +10,18 @@ Note: HID delta ~100 moves the cursor roughly 1/4 of the screen.
       Full screen ≈ 400 HID units (varies by OS mouse acceleration).
 """
 
+import glob
 import os
 import requests
 import time
 import math
 import random
 
+import cv2
+import numpy as np
+
 # --------------- config ---------------
-API_BASE = os.environ.get("SFU_API_BASE", "http://192.168.124.45:8888/api/message")
+API_BASE = os.environ.get("SFU_API_BASE", "http://127.0.0.1:8888/api/message")
 _device_id = ""         # set by init(device_id)
 MOVE_DELAY = 0.13       # inter-report delay (s)
 CLICK_HOLD = 0.15       # mouse-down duration (s)
@@ -225,6 +229,77 @@ def wait(sec: float):
 
 
 # ============================================================
+#  Scene template utilities
+# ============================================================
+
+def calc_hist(img):
+    """Compute normalised HSV histogram for an image."""
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    hist = cv2.calcHist([hsv], [0, 1], None, [32, 32], [0, 180, 0, 256])
+    cv2.normalize(hist, hist)
+    return hist
+
+
+def crop_region(img, region):
+    """Crop a normalised (x, y, w, h) region from img."""
+    h, w = img.shape[:2]
+    rx, ry, rw, rh = region
+    x1 = int(w * rx)
+    y1 = int(h * ry)
+    x2 = int(w * (rx + rw))
+    y2 = int(h * (ry + rh))
+    return img[y1:y2, x1:x2]
+
+
+def make_roi_rect(frame_h, frame_w, roi_x, roi_y, roi_w, roi_h):
+    """Convert normalized ROI to pixel coordinates."""
+    x1 = int(frame_w * roi_x)
+    y1 = int(frame_h * roi_y)
+    x2 = int(frame_w * (roi_x + roi_w))
+    y2 = int(frame_h * (roi_y + roi_h))
+    return x1, y1, x2, y2
+
+
+def load_templates(snapshot_dir, scene_regions):
+    """Load template images grouped by scene name.
+
+    Args:
+        snapshot_dir: directory containing snapshot JPEGs (name_N.jpg)
+        scene_regions: dict of scene_name -> [(x, y, w, h), ...]
+
+    Returns:
+        templates_hist: dict of scene_name -> [hist, ...]  (full-frame)
+        templates_region: dict of scene_name -> [[hist, ...], ...]  (sub-region)
+    """
+    raw = {}
+    for path in sorted(glob.glob(os.path.join(snapshot_dir, "*.jpg"))):
+        basename = os.path.splitext(os.path.basename(path))[0]
+        parts = basename.rsplit("_", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            scene_name = parts[0]
+        else:
+            continue
+        img = cv2.imread(path)
+        if img is None:
+            continue
+        raw.setdefault(scene_name, []).append(img)
+
+    templates_hist = {}
+    templates_region = {}
+    for name, imgs in raw.items():
+        templates_hist[name] = [calc_hist(img) for img in imgs]
+        if name in scene_regions:
+            region_hists = []
+            for region in scene_regions[name]:
+                region_hists.append([calc_hist(crop_region(img, region)) for img in imgs])
+            templates_region[name] = region_hists
+        n_regions = len(scene_regions.get(name, []))
+        print(f"  template: {name:35s} x{len(imgs)}"
+              f"{'  +' + str(n_regions) + ' regions' if n_regions else ''}")
+    return templates_hist, templates_region
+
+
+# ============================================================
 #  Screen capture / CV  (stub -- implement per environment)
 # ============================================================
 
@@ -407,6 +482,18 @@ def act_karyu_bt_click(args):
     click_pct(0.50, 0.60, repeat=1)
 
 
+@action("welcome_bt_click")
+def act_welcome_bt_click(args):
+    """Click Welcome Quest.  <hid_w> <hid_h>"""
+    if len(args) < 2:
+        print("karyu_bt_click requires: <hid_w> <hid_h>")
+        return
+    calibrate(manual_size=(int(args[0]), int(args[1])))
+    reset_origin()
+    print("[action] tap Welcome Quest")
+    click_pct(0.50, 0.38, repeat=1)
+
+
 @action("solo_bt_click")
 def act_solo_bt_click(args):
     """Click ソロ button.  <hid_w> <hid_h>"""
@@ -474,8 +561,8 @@ def act_play_turn(args):
     calibrate(manual_size=(int(args[0]), int(args[1])))
     reset_origin()
 
-    # random angle: 30deg increments (0, 30, 60, ... 330)
-    angle_deg = random.choice(range(0, 360, 30))
+    # random angle: 10deg increments (0, 10, 20, ... 350)
+    angle_deg = random.choice(range(0, 360, 10))
     angle_rad = math.radians(angle_deg)
     # random strength: 100-200 HID units
     strength = random.randint(100, 200)
@@ -528,6 +615,30 @@ def act_special_reward(args):
     reset_origin()
     print("[action] tap center (0.50, 0.50)")
     click_pct(0.50, 0.50, repeat=1)
+
+
+@action("information_ok")
+def act_information_ok(args):
+    """Click OK on information (お知らせ) dialog.  <hid_w> <hid_h>"""
+    if len(args) < 2:
+        print("information_ok requires: <hid_w> <hid_h>")
+        return
+    calibrate(manual_size=(int(args[0]), int(args[1])))
+    reset_origin()
+    print("[action] tap OK (0.50, 0.87)")
+    click_pct(0.50, 0.87, repeat=1)
+
+
+@action("login_bonus_ok")
+def act_login_bonus_ok(args):
+    """Click OK on login bonus (ログインボーナス) dialog.  <hid_w> <hid_h>"""
+    if len(args) < 2:
+        print("login_bonus_ok requires: <hid_w> <hid_h>")
+        return
+    calibrate(manual_size=(int(args[0]), int(args[1])))
+    reset_origin()
+    print("[action] tap OK (0.50, 0.87)")
+    click_pct(0.50, 0.87, repeat=1)
 
 
 @action("reward_next")

@@ -1,6 +1,8 @@
 #!/usr/bin/env python3
 """Monster Strike scene detector - camera capture base."""
 
+"""Welcome Auto-play."""
+
 import argparse
 import os
 import queue
@@ -16,10 +18,8 @@ import moorefsm
 from moorefsm import (
     S_UNKNOWN, S_HOME, S_EVENT, S_QUEST, S_NORMAL_QUEST,
     S_NORMAL_QUEST_UIJIN, S_NORMAL_QUEST_UIJIN_KARYU,
-    S_HELPER_SELECT, S_DECK_SELECT, S_IN_PLAY,
-    S_CLEAR_OK, S_SPECIAL_REWARD, S_NEED_DOWNLOAD,
-    S_TUTORIAL_YUJO_COMBO, S_TUTORIAL_BOSS_ATACK,
-    S_REWARD_NEXT, S_INFORMATION, S_LOGIN_BONUS,
+    S_HELPER_SELECT, S_DECK_SELECT, S_WELCOME_IN_PLAY,
+    S_CLEAR_OK, S_SPECIAL_REWARD, S_REWARD_NEXT,
     ONNX_CONF_LOW, fsm_update,
 )
 from barchart import (
@@ -101,14 +101,14 @@ SCENE_REGIONS = {
     "special-reward": [
         (0.18, 0.00, 0.70, 0.044),
     ],
+    
     "reward-next": [
         (0.01, 0.906, 0.98, 0.07),  # ok button
     ],
     "clear-ok": [
         (0.04, 0.534, 0.92, 0.069),
     ],
-    "normal-quest-uijin-in-play": [],
-    
+    "welcome-quest-00-in-play": [],
 }
 
 # --------------- FSM config ---------------
@@ -116,47 +116,31 @@ SCENE_REGIONS = {
 FSM_TRANSITIONS = {
     S_UNKNOWN: [S_HOME, S_EVENT, S_QUEST, S_NORMAL_QUEST, S_NORMAL_QUEST_UIJIN,
                 S_NORMAL_QUEST_UIJIN_KARYU, S_HELPER_SELECT, S_DECK_SELECT,
-                S_IN_PLAY, S_CLEAR_OK, S_SPECIAL_REWARD, S_REWARD_NEXT,
-                S_NEED_DOWNLOAD, S_TUTORIAL_YUJO_COMBO, S_TUTORIAL_BOSS_ATACK,
-                S_INFORMATION, S_LOGIN_BONUS],
-    S_HOME:                     [S_EVENT, S_QUEST, S_NORMAL_QUEST_UIJIN, S_INFORMATION,
-                                 S_LOGIN_BONUS],
-    S_INFORMATION:              [S_HOME, S_LOGIN_BONUS],
-    S_LOGIN_BONUS:              [S_HOME, S_INFORMATION],
-    S_EVENT:                    [S_QUEST, S_NORMAL_QUEST_UIJIN, S_HOME],
-    S_QUEST:                    [S_NORMAL_QUEST, S_HOME],
-    S_NORMAL_QUEST:             [S_NORMAL_QUEST_UIJIN, S_QUEST, S_HOME],
-    S_NORMAL_QUEST_UIJIN:      [S_NORMAL_QUEST_UIJIN_KARYU, S_NORMAL_QUEST, S_HOME],
-    S_NORMAL_QUEST_UIJIN_KARYU:[S_HELPER_SELECT, S_HOME],
-    S_HELPER_SELECT:            [S_DECK_SELECT, S_HOME],
-    S_DECK_SELECT:              [S_IN_PLAY, S_NEED_DOWNLOAD, S_HOME],
-    S_NEED_DOWNLOAD:            [S_IN_PLAY, S_HOME],
-    S_IN_PLAY:                  [S_CLEAR_OK, S_TUTORIAL_YUJO_COMBO, S_TUTORIAL_BOSS_ATACK],
-    S_TUTORIAL_YUJO_COMBO:      [S_IN_PLAY],
-    S_TUTORIAL_BOSS_ATACK:     [S_IN_PLAY],
+                S_WELCOME_IN_PLAY, S_CLEAR_OK, S_SPECIAL_REWARD, S_REWARD_NEXT],
+    S_HOME:                     [S_EVENT, S_NORMAL_QUEST_UIJIN],
+    S_EVENT:                    [S_NORMAL_QUEST],
+    S_NORMAL_QUEST:             [S_NORMAL_QUEST_UIJIN],
+    S_NORMAL_QUEST_UIJIN:      [S_NORMAL_QUEST_UIJIN_KARYU],
+    S_NORMAL_QUEST_UIJIN_KARYU:[S_DECK_SELECT],
+    S_DECK_SELECT:              [S_WELCOME_IN_PLAY, S_HOME],
+    S_WELCOME_IN_PLAY:                  [S_CLEAR_OK],
     S_CLEAR_OK:                 [S_SPECIAL_REWARD, S_REWARD_NEXT, S_HOME],
-    S_SPECIAL_REWARD:           [S_REWARD_NEXT],
-    S_REWARD_NEXT:              [S_HOME],
+    S_SPECIAL_REWARD:           [S_REWARD_NEXT, S_HOME],
+    S_REWARD_NEXT:              [S_HOME, S_SPECIAL_REWARD],
 }
 
 FSM_ACTIONS = {
     S_HOME:                     "quest_bt_click",
-    S_EVENT:                    "normal_ikusei_bt_click",
-    S_QUEST:                    "normal_bt_click",
+    S_EVENT:                    "normal_bt_click",
     S_NORMAL_QUEST:             "shojin_bt_click",
-    S_NORMAL_QUEST_UIJIN:      "karyu_bt_click",
+    S_NORMAL_QUEST_UIJIN:      "welcome_bt_click",
     S_NORMAL_QUEST_UIJIN_KARYU:"solo_bt_click",
     S_HELPER_SELECT:            "helper_select",
     S_DECK_SELECT:              "shutsugeki_bt_click",
-    S_IN_PLAY:                  "play_turn",
-    S_NEED_DOWNLOAD:            "need_download_ok",
-    S_TUTORIAL_YUJO_COMBO:      "tutorial_yujo_combo_ok",
-    S_TUTORIAL_BOSS_ATACK:     "tutorial_boss_atack_ok",
+    S_WELCOME_IN_PLAY:                  "play_turn",
     S_CLEAR_OK:                 "clear_ok",
     S_SPECIAL_REWARD:           "special_reward",
     S_REWARD_NEXT:              "reward_next",
-    S_INFORMATION:              "information_ok",
-    S_LOGIN_BONUS:              "login_bonus_ok",
 }
 
 moorefsm.FSM_TRANSITIONS = FSM_TRANSITIONS
@@ -283,14 +267,11 @@ def main():
                     if hid_enabled and fsm_state in FSM_ACTIONS:
                         _action_queue.put((FSM_ACTIONS[fsm_state], hid_args))
                 # IN-PLAY: periodic play_turn (skip if busy)
-                if (hid_enabled and fsm_state == S_IN_PLAY
+                if (hid_enabled and fsm_state == S_WELCOME_IN_PLAY
                         and now - last_play_turn >= PLAY_TURN_INTERVAL
                         and _worker_idle.is_set()):
                     _action_queue.put(("play_turn", hid_args))
                     last_play_turn = now
-                # Debug: show top scores
-                for sname, sscore in scores[:3]:
-                    print(f"  [{sname}] {sscore:.3f}")
 
             # --- FPS ---
             frame_count += 1
