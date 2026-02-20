@@ -17,9 +17,13 @@ from moorefsm import (
     S_UNKNOWN, S_HOME, S_EVENT, S_QUEST, S_NORMAL_QUEST,
     S_NORMAL_QUEST_UIJIN, S_NORMAL_QUEST_UIJIN_KARYU,
     S_HELPER_SELECT, S_DECK_SELECT, S_IN_PLAY,
-    S_CLEAR_OK, S_SPECIAL_REWARD, S_NEED_DOWNLOAD,
-    S_TUTORIAL_YUJO_COMBO, S_TUTORIAL_BOSS_ATACK,
-    S_REWARD_NEXT, S_INFORMATION, S_LOGIN_BONUS,
+    S_CLEAR_OK, S_SPECIAL_REWARD, S_REWARD_NEXT,
+    S_CONFIRM, S_INFORMATION, S_INFORMATION_GAZE, S_INFORMATION_GIMIC,
+    S_LOGIN_BONUS, S_LOGIN_STAMP, S_LOGIN_STAMP2,
+    S_NEED_DOWNLOAD, S_NEED_NICKNAME,
+    S_CONFIRM_RETRY, S_TUTORIAL_ATACK, S_TUTORIAL_BOSS_ATACK, S_TUTORIAL_YUJO_COMBO,
+    S_NEED_START, S_CALENDER, S_EVENT_MESSAGE_DIALOG, S_REWARD_CHARA,
+    MODAL_STATES,
     ONNX_CONF_LOW, fsm_update,
 )
 from barchart import (
@@ -108,39 +112,62 @@ SCENE_REGIONS = {
         (0.04, 0.534, 0.92, 0.069),
     ],
     "normal-quest-uijin-in-play": [],
-    
+    "confirm":            [],
+    "information":        [],
+    "information-gaze":   [],
+    "information-gimic":  [],
+    "login-bonus":        [],
+    "login-stamp":        [],
+    "login-stamp2":       [],
+    "need-download":      [],
+    "tutorial-boss-atack":[],
+    "confirm-retry":      [],
+    "tutorial-atack":     [],
+    "tutorial-yujo-combo":[],
+    "need-nickname":      [],
+    "need-start":         [],
+    "calender":           [],
+    "event-message-dialog": [],
+    "reward-chara":       [],
 }
 
 # --------------- FSM config ---------------
 
+# Non-modal scene states
+_SCENE_STATES = [
+    S_HOME, S_EVENT, S_QUEST, S_NORMAL_QUEST, S_NORMAL_QUEST_UIJIN,
+    S_NORMAL_QUEST_UIJIN_KARYU, S_HELPER_SELECT, S_DECK_SELECT,
+    S_IN_PLAY, S_CLEAR_OK, S_SPECIAL_REWARD, S_REWARD_NEXT,
+]
+
 FSM_TRANSITIONS = {
-    S_UNKNOWN: [S_HOME, S_EVENT, S_QUEST, S_NORMAL_QUEST, S_NORMAL_QUEST_UIJIN,
-                S_NORMAL_QUEST_UIJIN_KARYU, S_HELPER_SELECT, S_DECK_SELECT,
-                S_IN_PLAY, S_CLEAR_OK, S_SPECIAL_REWARD, S_REWARD_NEXT,
-                S_NEED_DOWNLOAD, S_TUTORIAL_YUJO_COMBO, S_TUTORIAL_BOSS_ATACK,
-                S_INFORMATION, S_LOGIN_BONUS],
-    S_HOME:                     [S_EVENT, S_QUEST, S_NORMAL_QUEST_UIJIN, S_INFORMATION,
-                                 S_LOGIN_BONUS],
-    S_INFORMATION:              [S_HOME, S_LOGIN_BONUS],
-    S_LOGIN_BONUS:              [S_HOME, S_INFORMATION],
-    S_EVENT:                    [S_QUEST, S_NORMAL_QUEST_UIJIN, S_HOME],
-    S_QUEST:                    [S_NORMAL_QUEST, S_HOME],
-    S_NORMAL_QUEST:             [S_NORMAL_QUEST_UIJIN, S_QUEST, S_HOME],
-    S_NORMAL_QUEST_UIJIN:      [S_NORMAL_QUEST_UIJIN_KARYU, S_NORMAL_QUEST, S_HOME],
-    S_NORMAL_QUEST_UIJIN_KARYU:[S_HELPER_SELECT, S_HOME],
-    S_HELPER_SELECT:            [S_DECK_SELECT, S_HOME],
-    S_DECK_SELECT:              [S_IN_PLAY, S_NEED_DOWNLOAD, S_HOME],
-    S_NEED_DOWNLOAD:            [S_IN_PLAY, S_HOME],
-    S_IN_PLAY:                  [S_CLEAR_OK, S_TUTORIAL_YUJO_COMBO, S_TUTORIAL_BOSS_ATACK],
-    S_TUTORIAL_YUJO_COMBO:      [S_IN_PLAY],
-    S_TUTORIAL_BOSS_ATACK:     [S_IN_PLAY],
-    S_CLEAR_OK:                 [S_SPECIAL_REWARD, S_REWARD_NEXT, S_HOME],
-    S_SPECIAL_REWARD:           [S_REWARD_NEXT],
-    S_REWARD_NEXT:              [S_HOME],
+    S_UNKNOWN:                  _SCENE_STATES + MODAL_STATES,
+    # --- normal flow (each also allows any modal) ---
+    S_HOME:                     [S_EVENT, S_QUEST, S_NORMAL_QUEST_UIJIN] + MODAL_STATES,
+    S_EVENT:                    [S_QUEST, S_NORMAL_QUEST_UIJIN, S_HOME] + MODAL_STATES,
+    S_QUEST:                    [S_NORMAL_QUEST, S_HOME] + MODAL_STATES,
+    S_NORMAL_QUEST:             [S_NORMAL_QUEST_UIJIN, S_QUEST, S_HOME] + MODAL_STATES,
+    S_NORMAL_QUEST_UIJIN:      [S_NORMAL_QUEST_UIJIN_KARYU, S_NORMAL_QUEST, S_HOME] + MODAL_STATES,
+    S_NORMAL_QUEST_UIJIN_KARYU:[S_HELPER_SELECT, S_HOME] + MODAL_STATES,
+    S_HELPER_SELECT:            [S_DECK_SELECT, S_HOME] + MODAL_STATES,
+    S_DECK_SELECT:              [S_IN_PLAY, S_HOME] + MODAL_STATES,
+    S_IN_PLAY:                  [S_CLEAR_OK] + MODAL_STATES,
+    S_CLEAR_OK:                 [S_SPECIAL_REWARD, S_REWARD_NEXT, S_HOME] + MODAL_STATES,
+    S_SPECIAL_REWARD:           [S_REWARD_NEXT, S_HOME] + MODAL_STATES,
+    S_REWARD_NEXT:              [S_HOME, S_SPECIAL_REWARD] + MODAL_STATES,
+    # --- modals: OK → back to any scene or another modal ---
+    **{s: _SCENE_STATES + MODAL_STATES for s in MODAL_STATES},
 }
 
 FSM_ACTIONS = {
     S_HOME:                     "quest_bt_click",
+    S_CONFIRM:                  "confirm_ok",
+    S_INFORMATION:              "information_ok",
+    S_INFORMATION_GAZE:         "information_gaze_ok",
+    S_INFORMATION_GIMIC:        "information_gimic_ok",
+    S_LOGIN_BONUS:              "login_bonus_ok",
+    S_LOGIN_STAMP:              "login_stamp_ok",
+    S_LOGIN_STAMP2:             "login_stamp2_ok",
     S_EVENT:                    "normal_ikusei_bt_click",
     S_QUEST:                    "normal_bt_click",
     S_NORMAL_QUEST:             "shojin_bt_click",
@@ -148,15 +175,20 @@ FSM_ACTIONS = {
     S_NORMAL_QUEST_UIJIN_KARYU:"solo_bt_click",
     S_HELPER_SELECT:            "helper_select",
     S_DECK_SELECT:              "shutsugeki_bt_click",
-    S_IN_PLAY:                  "play_turn",
     S_NEED_DOWNLOAD:            "need_download_ok",
+    S_NEED_NICKNAME:            "need_nickname_ok",
+    S_IN_PLAY:                  "play_turn",
+    S_CONFIRM_RETRY:             "confirm_retry_ok",
+    S_NEED_START:                "need_start_ok",
+    S_CALENDER:                  "calender_ok",
+    S_EVENT_MESSAGE_DIALOG:      "event_message_dialog_ok",
+    S_REWARD_CHARA:              "reward_chara_ok",
+    S_TUTORIAL_ATACK:            "tutorial_atack_ok",
     S_TUTORIAL_YUJO_COMBO:      "tutorial_yujo_combo_ok",
-    S_TUTORIAL_BOSS_ATACK:     "tutorial_boss_atack_ok",
+    S_TUTORIAL_BOSS_ATACK:      "tutorial_boss_atack_ok",
     S_CLEAR_OK:                 "clear_ok",
     S_SPECIAL_REWARD:           "special_reward",
     S_REWARD_NEXT:              "reward_next",
-    S_INFORMATION:              "information_ok",
-    S_LOGIN_BONUS:              "login_bonus_ok",
 }
 
 moorefsm.FSM_TRANSITIONS = FSM_TRANSITIONS
@@ -173,6 +205,8 @@ def _action_worker():
         action_name, hid_args = _action_queue.get()
         _worker_idle.clear()
         print(f"  [HID] dispatching: {action_name} (queue size: {_action_queue.qsize()})")
+        if action_name != "play_turn":
+            hid.notify_slack("scene", "action", action_name)
         try:
             hid.ACTIONS[action_name](hid_args)
             print(f"  [HID] done: {action_name}")
@@ -254,6 +288,8 @@ def main():
     toast_time = 0.0
     last_play_turn = 0.0
     PLAY_TURN_INTERVAL = 5.0
+    last_fsm_change = time.monotonic()
+    FSM_STUCK_TIMEOUT = 30.0
 
     try:
         while True:
@@ -273,11 +309,14 @@ def main():
                                        SCENE_REGIONS, templates_region)
                 last_detect = now
                 # FSM update
+                prev_fsm_state = fsm_state
                 fsm_state, fsm_changed = fsm_update(fsm_state, scores)
                 if fsm_changed:
                     print(f"  FSM -> {fsm_state}")
                     toast_text = fsm_state
                     toast_time = now
+                    last_fsm_change = now
+                    hid.notify_slack("scene", prev_fsm_state, fsm_state)
                     print(f"  [DEBUG] hid_enabled={hid_enabled} fsm_state={fsm_state} "
                           f"in_actions={fsm_state in FSM_ACTIONS}")
                     if hid_enabled and fsm_state in FSM_ACTIONS:
@@ -288,9 +327,25 @@ def main():
                         and _worker_idle.is_set()):
                     _action_queue.put(("play_turn", hid_args))
                     last_play_turn = now
-                # Debug: show top scores
-                for sname, sscore in scores[:3]:
-                    print(f"  [{sname}] {sscore:.3f}")
+                # Stuck timeout: click center if UNKNOWN or low-confidence for too long
+                top_score = scores[0][1] if scores else 0.0
+                if (hid_enabled
+                        and (fsm_state == S_UNKNOWN or top_score < ONNX_CONF_LOW)
+                        and now - last_fsm_change >= FSM_STUCK_TIMEOUT
+                        and _worker_idle.is_set()):
+                    print(f"  [FSM] stuck {FSM_STUCK_TIMEOUT:.0f}s — tap center")
+                    _action_queue.put(("confirm_ok", hid_args))
+                    last_fsm_change = now
+                # Re-trigger: same non-UNKNOWN state for 60s → re-fire action
+                FSM_RETRIGGER_TIMEOUT = 60.0
+                if (hid_enabled
+                        and fsm_state not in (S_UNKNOWN, S_IN_PLAY)
+                        and now - last_fsm_change >= FSM_RETRIGGER_TIMEOUT
+                        and fsm_state in FSM_ACTIONS
+                        and _worker_idle.is_set()):
+                    print(f"  [FSM] retrigger {fsm_state} after {FSM_RETRIGGER_TIMEOUT:.0f}s")
+                    _action_queue.put((FSM_ACTIONS[fsm_state], hid_args))
+                    last_fsm_change = now
 
             # --- FPS ---
             frame_count += 1

@@ -17,11 +17,14 @@ def draw_chart(scores, chart_w, chart_h):
     panel = np.zeros((chart_h, chart_w, 3), dtype=np.uint8)
     panel[:] = (30, 30, 30)
 
+    # Sort: score DESC (rounded to 2 decimals), then name ASC
+    sorted_scores = sorted(scores, key=lambda s: (-round(s[1], 2), s[0]))
+
     label_x = 8
     bar_x0 = 105
     y = 10
 
-    for i, (name, score) in enumerate(scores):
+    for i, (name, score) in enumerate(sorted_scores):
         cy = y + BAR_H // 2
 
         if i == 0:

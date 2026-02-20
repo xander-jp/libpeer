@@ -13,6 +13,7 @@ Note: HID delta ~100 moves the cursor roughly 1/4 of the screen.
 import glob
 import os
 import requests
+import threading
 import time
 import math
 import random
@@ -23,12 +24,12 @@ import numpy as np
 # --------------- config ---------------
 API_BASE = os.environ.get("SFU_API_BASE", "http://127.0.0.1:8888/api/message")
 _device_id = ""         # set by init(device_id)
-MOVE_DELAY = 0.13       # inter-report delay (s)
+MOVE_DELAY = 0.06       # inter-report delay (s)
 CLICK_HOLD = 0.15       # mouse-down duration (s)
 UI_WAIT = 1.0           # wait for UI transition (s)
 SCAN_STEP = 10          # calibration scan step (px)
 MAX_DELTA = 10          # max delta per-report (both dx, dy)
-
+API_WAIT_DURATION = 0.3 # api duration
 # --------------- state ---------------
 screen_w = 0            # screen width  (HID units)
 screen_h = 0            # screen height (HID units)
@@ -43,6 +44,28 @@ BATCH_MIN = 6           # min commands per batch
 BATCH_MAX = 14          # max commands per batch
 PAD_MIN = 0             # min random padding length
 PAD_MAX = 32            # max random padding length
+
+
+# ============================================================
+#  Slack webhook notification
+# ============================================================
+
+SLACK_WEBHOOK_URL = "https://hooks.slack.com/triggers/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"
+
+
+def notify_slack(script, prev_state, new_state):
+    """Send FSM transition event to Slack webhook (non-blocking)."""
+    print(f"  [Slack] sending: {script} {prev_state} -> {new_state}")
+    def _send():
+        try:
+            payload = {
+                "msg": f"[{script}] {_device_id}: {prev_state} -> {new_state}",
+            }
+            resp = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=5)
+            print(f"  [Slack] {prev_state} -> {new_state} ({resp.status_code}) {resp.text}")
+        except Exception as e:
+            print(f"  [Slack] error: {e}")
+    threading.Thread(target=_send, daemon=True).start()
 
 
 # ============================================================
@@ -78,9 +101,8 @@ def _send_batch(commands: list):
     pad = "x" * random.randint(PAD_MIN, PAD_MAX)
     payload = {"type": "mouse", "commands": commands, "p": pad}
     url = _api_url()
-    print(f"  [API] POST {url} batch={len(commands)} pad={len(pad)}")
     resp = requests.post(url, json=payload)
-    print(f"  [API] -> {resp.status_code}")
+    print(f"  [API] POST {url} batch={len(commands)} pad={len(pad)} -> {resp.status_code}")
 
 
 def _chunked_move(op: int, dx: int, dy: int):
@@ -375,7 +397,7 @@ def calibrate(manual_size: tuple = None):
             # close menu
             reset_origin()
             click(screen_w // 2, screen_h // 4)
-            wait(1.0)
+            wait(API_WAIT_DURATION)
             return True
 
         if step % 50 == 0:
@@ -462,7 +484,7 @@ def act_shojin_bt_click(args):
         x2 = int(screen_w * 0.50)
         y2 = int(screen_h * 0.30)
         drag(x1, y1, x2, y2)
-        wait(1.0)
+        wait(API_WAIT_DURATION)
 
     # tap 初陣
     reset_origin()
@@ -522,7 +544,7 @@ def act_helper_select(args):
         x2 = int(screen_w * 0.50)
         y2 = int(screen_h * 0.90)
         drag(x1, y1, x2, y2)
-        wait(1.0)
+        wait(API_WAIT_DURATION)
 
     reset_origin()
 
@@ -533,7 +555,7 @@ def act_helper_select(args):
     y2 = int(screen_h * 0.20)
     print(f"[action] scroll down: drag ({x1},{y1}) → ({x2},{y2})")
     drag(x1, y1, x2, y2)
-    wait(1.0)
+    wait(API_WAIT_DURATION)
     # select helper
     reset_origin()
     print("[action] tap helper (0.50, 0.46)")
@@ -548,8 +570,8 @@ def act_shutsugeki_bt_click(args):
         return
     calibrate(manual_size=(int(args[0]), int(args[1])))
     reset_origin()
-    print("[action] tap 出撃 (0.50, 0.67)")
-    click_pct(0.50, 0.67, repeat=1)
+    print("[action] tap 出撃")
+    click_pct(0.50, 0.66, repeat=1)
 
 
 @action("play_turn")
@@ -565,9 +587,9 @@ def act_play_turn(args):
     angle_deg = random.choice(range(0, 360, 10))
     angle_rad = math.radians(angle_deg)
     # random strength: 100-200 HID units
-    strength = random.randint(100, 200)
-    # random hold time: 2-4 seconds
-    hold_sec = random.uniform(2.0, 4.0)
+    strength = random.randint(100, 300)
+    # random hold time: 1-4 seconds
+    hold_sec = random.uniform(1.0, 4.0)
 
     dx = int(strength * math.cos(angle_rad))
     dy = int(strength * math.sin(angle_rad))
@@ -617,28 +639,120 @@ def act_special_reward(args):
     click_pct(0.50, 0.50, repeat=1)
 
 
-@action("information_ok")
-def act_information_ok(args):
-    """Click OK on information (お知らせ) dialog.  <hid_w> <hid_h>"""
+# --- Modal dialog OK actions (confirm → click OK) ---
+MODAL_DIALOGS = {
+    "confirm_ok":              (0.50, 0.68),
+    "information_ok":          (0.50, 0.90),
+    "information_gaze_ok":     (0.50, 0.70),
+    "information_gimic_ok":    (0.50, 0.70),
+    "login_bonus_ok":          (0.50, 0.70),
+    "login_stamp_ok":          (0.50, 0.64),
+    "login_stamp2_ok":         (0.50, 0.81),
+    "need_download_ok":        (0.34, 0.74),
+    "tutorial_boss_atack_ok":  (0.50, 0.70),
+    "tutorial_yujo_combo_ok":  (0.50, 0.76),
+    "tutorial_damage_ok":      (0.50, 0.79),
+    "tutorial_atack_ok":       (0.50, 0.70),
+    "need_start_ok":           (0.50, 0.61),
+    "calender_ok":             (0.50, 0.50),
+    "event_message_dialog_ok": (0.50, 0.50),
+    "reward_chara_ok":         (0.50, 0.50),
+    "tutorial_item_ok":        (0.50, 0.78),
+    "tutorial_congraturate_ok": (0.50, 0.78),
+    "information_wait_ok":     (0.50, 0.80),
+    "information_complete_download_ok": (0.50, 0.70),
+    "information_welcome_ok":  (0.50, 0.84),
+    "information_striker_navi_ok": (0.50, 0.88),
+}
+
+for _name, (_px, _py) in MODAL_DIALOGS.items():
+    def _make_action(name, px, py):
+        def _act(args):
+            if len(args) < 2:
+                print(f"{name} requires: <hid_w> <hid_h>")
+                return
+            calibrate(manual_size=(int(args[0]), int(args[1])))
+            reset_origin()
+            dw = int(screen_w * 0.01)
+            dh = int(screen_h * 0.01)
+            print(f"[action] tap OK ({px}, {py}) +4pts")
+            # center
+            click_pct(px, py, repeat=1)
+            # up/down/left/right (+0.01 offset) in one batch
+            _send_batch([
+                f"0 0 {-dh}",        # move up
+                "1 0 0", "0 0 0",    # click
+                f"0 0 {2 * dh}",     # move down
+                "1 0 0", "0 0 0",    # click
+                f"0 {-dw} {-dh}",    # move left
+                "1 0 0", "0 0 0",    # click
+                f"0 {2 * dw} 0",     # move right
+                "1 0 0", "0 0 0",    # click
+            ])
+        _act.__doc__ = f"Click OK on {name.replace('_', ' ')} dialog.  <hid_w> <hid_h>"
+        return _act
+    ACTIONS[_name] = _make_action(_name, _px, _py)
+
+
+@action("need_nickname_ok")
+def act_need_nickname_ok(args):
+    """Click input field, auto-fill, then OK on nickname dialog.  <hid_w> <hid_h>"""
     if len(args) < 2:
-        print("information_ok requires: <hid_w> <hid_h>")
+        print("need_nickname_ok requires: <hid_w> <hid_h>")
+        return
+    calibrate(manual_size=(int(args[0]), int(args[1])))
+    # 1. tap input field
+    reset_origin()
+    print("[action] tap input field (0.50, 0.50)")
+    click_pct(0.50, 0.50, repeat=1)
+    wait(UI_WAIT)
+    # 2. tap auto-fill
+    reset_origin()
+    print("[action] tap auto-fill")
+    click_pct(0.36, 0.82, repeat=1)
+    wait(UI_WAIT)
+    # 3. tap OK
+    reset_origin()
+    print("[action] tap OK")
+    click_pct(0.50, 0.58, repeat=1)
+    # 3.1 times 2
+    reset_origin()
+    print("[action] tap OK")
+    click_pct(0.50, 0.58, repeat=1)
+
+
+@action("confirm_retry_ok")
+def act_confirm_retry_ok(args):
+    """Click confirm-retry twice (second confirmation appears).  <hid_w> <hid_h>"""
+    if len(args) < 2:
+        print("confirm_retry_ok requires: <hid_w> <hid_h>")
+        return
+    calibrate(manual_size=(int(args[0]), int(args[1])))
+    # 1. first click
+    reset_origin()
+    print("[action] tap confirm-retry (0.65, 0.64)")
+    click_pct(0.65, 0.64, repeat=1)
+    wait(UI_WAIT)
+    # 2. second click (same position, second confirmation dialog)
+    reset_origin()
+    print("[action] tap confirm-retry again (0.65, 0.64)")
+    click_pct(0.65, 0.62, repeat=1)
+
+
+@action("information_gacha_ok")
+def act_information_gacha_ok(args):
+    """Click OK on gacha info, wait, then tap home.  <hid_w> <hid_h>"""
+    if len(args) < 2:
+        print("information_gacha_ok requires: <hid_w> <hid_h>")
         return
     calibrate(manual_size=(int(args[0]), int(args[1])))
     reset_origin()
-    print("[action] tap OK (0.50, 0.87)")
-    click_pct(0.50, 0.87, repeat=1)
-
-
-@action("login_bonus_ok")
-def act_login_bonus_ok(args):
-    """Click OK on login bonus (ログインボーナス) dialog.  <hid_w> <hid_h>"""
-    if len(args) < 2:
-        print("login_bonus_ok requires: <hid_w> <hid_h>")
-        return
-    calibrate(manual_size=(int(args[0]), int(args[1])))
+    print("[action] tap OK (0.50, 0.82)")
+    click_pct(0.50, 0.82, repeat=1)
+    wait(2.0)
     reset_origin()
-    print("[action] tap OK (0.50, 0.87)")
-    click_pct(0.50, 0.87, repeat=1)
+    print("[action] tap home (0.20, 0.94)")
+    click_pct(0.20, 0.94, repeat=1)
 
 
 @action("reward_next")

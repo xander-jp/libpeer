@@ -28,6 +28,19 @@ S_CALENDER = "CALENDER"
 S_EVENT_MESSAGE_DIALOG = "EVENT-MESSAGE-DIALOG"
 S_REWARD_CHARA = "REWARD-CHARA"
 S_TUTORIAL_BOSS_ATACK = "TUTORIAL-BOSS-ATACK"
+S_CONFIRM = "CONFIRM"
+S_NEED_NICKNAME = "NEED-NICKNAME"
+S_TUTORIAL_ATACK = "TUTORIAL-ATACK"
+S_CONFIRM_RETRY = "CONFIRM-RETRY"
+S_NEED_START = "NEED-START"
+S_TUTORIAL_ITEM = "TUTORIAL-ITEM"
+S_TUTORIAL_DAMAGE = "TUTORIAL-DAMAGE"
+S_TUTORIAL_CONGRATURATE = "TUTORIAL-CONGRATURATE"
+S_INFORMATION_WAIT = "INFORMATION-WAIT"
+S_INFORMATION_COMPLETE_DOWNLOAD = "INFORMATION-COMPLETE-DOWNLOAD"
+S_INFORMATION_GACHA = "INFORMATION-GACHA"
+S_INFORMATION_WELCOME = "INFORMATION-WELCOME"
+S_INFORMATION_STRIKER_NAVI = "INFORMATION-STRIKER-NAVI"
 
 # --------------- Transition table / Action mapping ---------------
 # Set from entry-point source before calling fsm_update().
@@ -48,6 +61,11 @@ SCENE_NAME_TO_STATE = {
     "deck-select": S_DECK_SELECT,
     "normal-quest-uijin-in-play": S_IN_PLAY,
     "welcome-quest-00-in-play": S_WELCOME_IN_PLAY,
+    "welcome-quest-01-in-play": S_WELCOME_IN_PLAY,
+    "welcome-quest-02-in-play": S_WELCOME_IN_PLAY,
+    "welcome-quest-03-in-play": S_WELCOME_IN_PLAY,
+    "welcome-quest-04-in-play": S_WELCOME_IN_PLAY,
+    "welcome-quest-05-in-play": S_WELCOME_IN_PLAY,
     "need-download": S_NEED_DOWNLOAD,
     "tutorial-yujo-combo": S_TUTORIAL_YUJO_COMBO,
     "clear-ok": S_CLEAR_OK,
@@ -63,7 +81,41 @@ SCENE_NAME_TO_STATE = {
     "event-message-dialog": S_EVENT_MESSAGE_DIALOG,
     "reward-chara": S_REWARD_CHARA,
     "tutorial-boss-atack": S_TUTORIAL_BOSS_ATACK,
+    "confirm": S_CONFIRM,
+    "need-nickname": S_NEED_NICKNAME,
+    "tutorial-atack": S_TUTORIAL_ATACK,
+    "confirm-retry": S_CONFIRM_RETRY,
+    "need-start": S_NEED_START,
+    "tutorial-quest-00-in-play": S_WELCOME_IN_PLAY,
+    "tutorial-item": S_TUTORIAL_ITEM,
+    "tutorial-damage": S_TUTORIAL_DAMAGE,
+    "tutorial-congraturate": S_TUTORIAL_CONGRATURATE,
+    "information-wait": S_INFORMATION_WAIT,
+    "information-complete-download": S_INFORMATION_COMPLETE_DOWNLOAD,
+    "information-gacha": S_INFORMATION_GACHA,
+    "information-welcome": S_INFORMATION_WELCOME,
+    "information-striker-navi": S_INFORMATION_STRIKER_NAVI,
 }
+
+# --------------- Modal dialog states ---------------
+# All modal states: auto-generates action name from state value
+# e.g. "CONFIRM" -> "confirm_ok", "INFORMATION-GAZE" -> "information_gaze_ok"
+
+MODAL_STATES = [
+    S_CONFIRM, S_INFORMATION, S_INFORMATION_GAZE, S_INFORMATION_GIMIC,
+    S_LOGIN_BONUS, S_LOGIN_STAMP, S_LOGIN_STAMP2,
+    S_NEED_DOWNLOAD, S_NEED_NICKNAME,
+    S_CONFIRM_RETRY, S_TUTORIAL_ATACK, S_TUTORIAL_BOSS_ATACK, S_TUTORIAL_YUJO_COMBO,
+    S_NEED_START, S_CALENDER, S_EVENT_MESSAGE_DIALOG, S_REWARD_CHARA,
+    S_TUTORIAL_ITEM, S_TUTORIAL_DAMAGE, S_TUTORIAL_CONGRATURATE,
+    S_INFORMATION_WAIT,
+    S_INFORMATION_COMPLETE_DOWNLOAD,
+    S_INFORMATION_GACHA,
+    S_INFORMATION_WELCOME,
+    S_INFORMATION_STRIKER_NAVI,
+]
+
+MODAL_FSM_ACTIONS = {s: s.lower().replace("-", "_") + "_ok" for s in MODAL_STATES}
 
 # --------------- ONNX evaluation thresholds ---------------
 
