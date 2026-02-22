@@ -47,25 +47,307 @@ PAD_MAX = 32            # max random padding length
 
 
 # ============================================================
+#  Global last frame (set by caller, used by notify_slack)
+# ============================================================
+_last_frame = None      # latest ROI frame (numpy BGR)
+
+# ============================================================
 #  Slack webhook notification
 # ============================================================
 
 SLACK_WEBHOOK_URL = "https://hooks.slack.com/triggers/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"
+SLACK_BOT_TOKEN = os.environ.get("SLACK_BOT_TOKEN", "")
+SLACK_CHANNEL = os.environ.get("SLACK_CHANNEL", "")
+
+THUMB_W = 60
+THUMB_H = 120
 
 
 def notify_slack(script, prev_state, new_state):
-    """Send FSM transition event to Slack webhook (non-blocking)."""
+    """Send FSM transition event to Slack webhook (non-blocking).
+
+    If _last_frame is set and SLACK_BOT_TOKEN / SLACK_CHANNEL are configured,
+    also uploads a 120x60 thumbnail of the current frame.
+    Skips thumbnail for "action" events (same frame as preceding transition).
+    """
     print(f"  [Slack] sending: {script} {prev_state} -> {new_state}")
+    # snapshot frame now (before thread); skip for action events (redundant frame)
+    skip_thumb = (prev_state == "action")
+    frame = _last_frame.copy() if (_last_frame is not None and not skip_thumb) else None
+
     def _send():
-        try:
-            payload = {
-                "msg": f"[{script}] {_device_id}: {prev_state} -> {new_state}",
-            }
-            resp = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=5)
-            print(f"  [Slack] {prev_state} -> {new_state} ({resp.status_code}) {resp.text}")
-        except Exception as e:
-            print(f"  [Slack] error: {e}")
+        msg = f"[{script}] {_device_id}: {prev_state} -> {new_state}"
+        # try:
+        #     # 1) webhook message (existing)
+        #     payload = {"msg": msg}
+        #     resp = requests.post(SLACK_WEBHOOK_URL, json=payload, timeout=5)
+        #     print(f"  [Slack] {prev_state} -> {new_state} ({resp.status_code}) {resp.text}")
+        # except Exception as e:
+        #     print(f"  [Slack] webhook error: {e}")
+
+        if not SLACK_BOT_TOKEN or not SLACK_CHANNEL:
+            return
+        headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}"}
+
+        # 2a) thumbnail + message via file upload
+        if frame is not None:
+            try:
+                thumb = cv2.resize(frame, (THUMB_W, THUMB_H))
+                _, jpeg = cv2.imencode(".jpg", thumb, [cv2.IMWRITE_JPEG_QUALITY, 70])
+                jpeg_bytes = jpeg.tobytes()
+
+                r1 = requests.get(
+                    "https://slack.com/api/files.getUploadURLExternal",
+                    headers=headers,
+                    params={"filename": "frame.jpg", "length": len(jpeg_bytes)},
+                    timeout=10,
+                ).json()
+                if not r1.get("ok"):
+                    print(f"  [Slack] getUploadURL: err={r1.get('error', '-')}")
+                    return
+
+                requests.post(
+                    r1["upload_url"],
+                    data=jpeg_bytes,
+                    headers={"Content-Type": "image/jpeg"},
+                    timeout=10,
+                )
+
+                r3 = requests.post(
+                    "https://slack.com/api/files.completeUploadExternal",
+                    headers={**headers, "Content-Type": "application/json"},
+                    json={
+                        "files": [{"id": r1["file_id"], "title": "frame.jpg"}],
+                        "channel_id": SLACK_CHANNEL,
+                        "initial_comment": msg,
+                    },
+                    timeout=10,
+                ).json()
+                print(f"  [Slack] thumbnail: ok={r3.get('ok')} err={r3.get('error', '-')}")
+            except Exception as e:
+                print(f"  [Slack] thumbnail error: {e}")
+        # 2b) text-only message (no thumbnail)
+        else:
+            try:
+                r = requests.post(
+                    "https://slack.com/api/chat.postMessage",
+                    headers={**headers, "Content-Type": "application/json"},
+                    json={"channel": SLACK_CHANNEL, "text": msg},
+                    timeout=10,
+                ).json()
+                print(f"  [Slack] text: ok={r.get('ok')} err={r.get('error', '-')}")
+            except Exception as e:
+                print(f"  [Slack] text error: {e}")
+
     threading.Thread(target=_send, daemon=True).start()
+
+
+# ============================================================
+#  Flow grid (shared renderer)
+# ============================================================
+
+GRID_COLS = 8
+GRID_THUMB_W = 60
+GRID_THUMB_H = 120
+GRID_LABEL_H = 24
+GRID_SEP = 2
+
+
+def compose_flow_grid(frames):
+    """Create grid of frames (8 per row) with state labels.
+
+    Args:
+        frames: list of (state_name, frame_bgr)
+    Returns: numpy BGR image or None.
+    """
+    if not frames:
+        return None
+
+    n = len(frames)
+    cols = GRID_COLS
+    rows = (n + cols - 1) // cols
+
+    cell_w = GRID_THUMB_W + GRID_SEP
+    cell_h = GRID_THUMB_H + GRID_LABEL_H + GRID_SEP
+    total_w = cell_w * cols - GRID_SEP
+    total_h = cell_h * rows - GRID_SEP
+    grid = np.zeros((total_h, total_w, 3), dtype=np.uint8)
+
+    font = cv2.FONT_HERSHEY_PLAIN
+    scale = 0.6
+    for i, (state_name, frame) in enumerate(frames):
+        r = i // cols
+        c = i % cols
+        x = c * cell_w
+        y = r * cell_h
+
+        thumb = cv2.resize(frame, (GRID_THUMB_W, GRID_THUMB_H))
+        grid[y:y + GRID_THUMB_H, x:x + GRID_THUMB_W] = thumb
+
+        # label (two lines for long names)
+        label = state_name
+        if len(label) > 10:
+            mid = label.rfind("-", 0, 11)
+            if mid > 0:
+                line1, line2 = label[:mid], label[mid + 1:]
+            else:
+                line1, line2 = label[:10], label[10:]
+            cv2.putText(grid, line1, (x + 1, y + GRID_THUMB_H + 10),
+                        font, scale, (200, 200, 200), 1)
+            cv2.putText(grid, line2[:12], (x + 1, y + GRID_THUMB_H + 20),
+                        font, scale, (200, 200, 200), 1)
+        else:
+            cv2.putText(grid, label, (x + 1, y + GRID_THUMB_H + 10),
+                        font, scale, (200, 200, 200), 1)
+
+    return grid
+
+
+def _upload_grid(jpeg_bytes, filename, msg, tag):
+    """Upload a grid JPEG to Slack (runs in thread)."""
+    try:
+        headers = {"Authorization": f"Bearer {SLACK_BOT_TOKEN}"}
+        r1 = requests.get(
+            "https://slack.com/api/files.getUploadURLExternal",
+            headers=headers,
+            params={"filename": filename, "length": len(jpeg_bytes)},
+            timeout=10,
+        ).json()
+        if not r1.get("ok"):
+            print(f"  [{tag}] getUploadURL: err={r1.get('error', '-')}")
+            return
+
+        requests.post(
+            r1["upload_url"],
+            data=jpeg_bytes,
+            headers={"Content-Type": "image/jpeg"},
+            timeout=10,
+        )
+
+        r3 = requests.post(
+            "https://slack.com/api/files.completeUploadExternal",
+            headers={**headers, "Content-Type": "application/json"},
+            json={
+                "files": [{"id": r1["file_id"], "title": filename}],
+                "channel_id": SLACK_CHANNEL,
+                "initial_comment": msg,
+            },
+            timeout=10,
+        ).json()
+        print(f"  [{tag}] uploaded: ok={r3.get('ok')} err={r3.get('error', '-')}")
+    except Exception as e:
+        print(f"  [{tag}] upload error: {e}")
+
+
+# ============================================================
+#  Full test (start → INFORMATION-COMPLETE-DOWNLOAD → HOME)
+# ============================================================
+full_test_frames = []   # [(state_name, frame_bgr), ...]
+_test_start_time = None
+
+
+def save_full_test_frame(state_name, frame):
+    """Append a snapshot for the full test flow."""
+    global _test_start_time
+    if frame is not None:
+        if not full_test_frames:
+            _test_start_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        full_test_frames.append((state_name, frame.copy()))
+        print(f"  [FullTest] #{len(full_test_frames)}: {state_name}")
+
+
+def reset_full_test():
+    """Clear full test data for next run."""
+    global _test_start_time
+    full_test_frames.clear()
+    _test_start_time = None
+
+
+def send_full_test_result(script, extra_msg=""):
+    """Compose full test grid and upload to Slack (non-blocking)."""
+    grid = compose_flow_grid(full_test_frames)
+    if grid is None:
+        return
+    if not SLACK_BOT_TOKEN or not SLACK_CHANNEL:
+        print(f"  [FullTest] grid composed {grid.shape} but Slack not configured")
+        return
+
+    end_time = time.strftime("%Y-%m-%d %H:%M:%S")
+    n_frames = len(full_test_frames)
+    states_str = " -> ".join(s for s, _ in full_test_frames)
+    start_time = _test_start_time or "?"
+    _, jpeg = cv2.imencode(".jpg", grid, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    jpeg_bytes = jpeg.tobytes()
+
+    msg = (f"\u2705 [{script}] device {_device_id}: test complete!\n"
+           f"Start: {start_time}  End: {end_time}\n"
+           f"FSM transitions: {n_frames}\n"
+           f"{states_str}")
+    if extra_msg:
+        msg += f"\n\n{extra_msg}"
+
+    threading.Thread(
+        target=_upload_grid,
+        args=(jpeg_bytes, "test_result.jpg", msg, "FullTest"),
+        daemon=True,
+    ).start()
+
+
+# ============================================================
+#  Subtotal (SPECIAL-REWARD → REWARD-NEXT)
+# ============================================================
+subtotal_frames = []    # [(state_name, frame_bgr), ...]
+_subtotal_start_time = None
+_subtotal_count = 0
+
+
+def save_subtotal_frame(state_name, frame):
+    """Append a snapshot for the current subtotal segment."""
+    global _subtotal_start_time
+    if frame is not None:
+        if not subtotal_frames:
+            _subtotal_start_time = time.strftime("%Y-%m-%d %H:%M:%S")
+        subtotal_frames.append((state_name, frame.copy()))
+
+
+def reset_subtotal():
+    """Clear subtotal frames for next segment."""
+    global _subtotal_start_time
+    subtotal_frames.clear()
+    _subtotal_start_time = None
+
+
+def send_subtotal_result(script, extra_msg=""):
+    """Compose subtotal grid and upload to Slack (non-blocking)."""
+    global _subtotal_count
+    _subtotal_count += 1
+    grid = compose_flow_grid(subtotal_frames)
+    if grid is None:
+        return
+    if not SLACK_BOT_TOKEN or not SLACK_CHANNEL:
+        print(f"  [Subtotal] grid composed {grid.shape} but Slack not configured")
+        return
+
+    end_time = time.strftime("%Y-%m-%d %H:%M:%S")
+    n_frames = len(subtotal_frames)
+    states_str = " -> ".join(s for s, _ in subtotal_frames)
+    start_time = _subtotal_start_time or "?"
+    _, jpeg = cv2.imencode(".jpg", grid, [cv2.IMWRITE_JPEG_QUALITY, 85])
+    jpeg_bytes = jpeg.tobytes()
+
+    msg = (f"\U0001f4ca [{script}] device {_device_id}: "
+           f"subtotal #{_subtotal_count}\n"
+           f"Start: {start_time}  End: {end_time}\n"
+           f"FSM transitions: {n_frames}\n"
+           f"{states_str}")
+    if extra_msg:
+        msg += f"\n\n{extra_msg}"
+
+    threading.Thread(
+        target=_upload_grid,
+        args=(jpeg_bytes, f"subtotal_{_subtotal_count}.jpg", msg, "Subtotal"),
+        daemon=True,
+    ).start()
 
 
 # ============================================================
@@ -742,20 +1024,22 @@ MODAL_DIALOGS = {
     "login_stamp_ok":          (0.50, 0.64),
     "login_stamp2_ok":         (0.50, 0.81),
     "need_download_ok":        (0.34, 0.74),
-    "tutorial_boss_atack_ok":  (0.50, 0.70),
+    "tutorial_boss_atack_ok":  (0.50, 0.76),
     "tutorial_yujo_combo_ok":  (0.50, 0.76),
     "tutorial_damage_ok":      (0.50, 0.79),
-    "tutorial_atack_ok":       (0.50, 0.70),
+    "tutorial_atack_ok":       (0.50, 0.74),
     "need_start_ok":           (0.50, 0.61),
     "calender_ok":             (0.50, 0.50),
     "event_message_dialog_ok": (0.50, 0.50),
     "reward_chara_ok":         (0.50, 0.50),
     "tutorial_item_ok":        (0.50, 0.78),
-    "tutorial_congraturate_ok": (0.50, 0.78),
-    "information_wait_ok":     (0.50, 0.80),
-    "information_complete_download_ok": (0.50, 0.70),
-    "information_welcome_ok":  (0.50, 0.84),
+    "tutorial_congraturate_ok": (0.50, 0.70),
+    "information_wait_ok":     (0.50, 0.81),
+    "information_complete_download_ok": (0.50, 0.68),
+    "information_welcome_ok":  (0.50, 0.86),
     "information_striker_navi_ok": (0.50, 0.88),
+    "tutorial_clear_ok":       (0.50, 0.61),
+    "information_gimic2_ok":   (0.50, 0.78),
 }
 
 for _name, (_px, _py) in MODAL_DIALOGS.items():
@@ -797,7 +1081,7 @@ def act_need_nickname_ok(args):
     # 1. tap input field
     reset_origin()
     print("[action] tap input field (0.50, 0.50)")
-    click_pct(0.50, 0.50, repeat=1)
+    click_pct(0.50, 0.51, repeat=1)
     wait(UI_WAIT)
     # 2. tap auto-fill
     reset_origin()
@@ -842,10 +1126,10 @@ def act_information_gacha_ok(args):
     reset_origin()
     print("[action] tap OK (0.50, 0.82)")
     click_pct(0.50, 0.82, repeat=1)
-    wait(2.0)
+    wait(3.0)
     reset_origin()
-    print("[action] tap home (0.20, 0.94)")
-    click_pct(0.20, 0.94, repeat=1)
+    print("[action] tap home (0.12, 0.92)")
+    click_pct(0.12, 0.98, repeat=1)
 
 
 @action("reward_next")

@@ -27,7 +27,8 @@ from moorefsm import (
     S_NEED_START, S_CALENDER, S_EVENT_MESSAGE_DIALOG, S_REWARD_CHARA,
     S_TUTORIAL_ITEM, S_TUTORIAL_DAMAGE, S_TUTORIAL_CONGRATURATE,
     S_INFORMATION_WAIT, S_INFORMATION_COMPLETE_DOWNLOAD, S_INFORMATION_GACHA,
-    S_INFORMATION_WELCOME, S_INFORMATION_STRIKER_NAVI,
+    S_INFORMATION_WELCOME, S_INFORMATION_STRIKER_NAVI, S_TUTORIAL_CLEAR,
+    S_INFORMATION_GIMIC2,
     MODAL_STATES,
     ONNX_CONF_LOW, fsm_update,
 )
@@ -158,8 +159,10 @@ SCENE_REGIONS = {
         (0.11, 0.712, 0.78, 0.07),
     ],
     "information-complete-download": [
-        (0.01, 0.906, 0.98, 0.07), 
+        (0.01, 0.906, 0.98, 0.07),
     ],
+    "tutorial-clear": [],
+    "information-gimic2": [],
 }
 
 # --------------- FSM config ---------------
@@ -222,6 +225,8 @@ FSM_ACTIONS = {
     S_INFORMATION_GACHA:        "information_gacha_ok",
     S_INFORMATION_WELCOME:      "information_welcome_ok",
     S_INFORMATION_STRIKER_NAVI: "information_striker_navi_ok",
+    S_TUTORIAL_CLEAR:           "tutorial_clear_ok",
+    S_INFORMATION_GIMIC2:       "information_gimic2_ok",
     S_CLEAR_OK:                 "clear_ok",
     S_SPECIAL_REWARD:           "special_reward",
     S_REWARD_NEXT:              "reward_next",
@@ -233,6 +238,8 @@ moorefsm.FSM_ACTIONS = FSM_ACTIONS
 # --- Welcome quest stage progression ---
 # Cycles: その1 → その2 → その3 → その4 → その5 → 全課程終了 → (loop)
 _welcome_stage = 0
+_current_flow_stage = None    # stage index being played in current flow
+_completed_stages = set()     # indices of completed stages
 
 # (scroll_down_count, scroll_up_count, click_y, label)
 WELCOME_STAGES = [
@@ -247,12 +254,13 @@ WELCOME_STAGES = [
 
 def _act_welcome_stage_click(args):
     """Click current welcome stage button, then advance to next."""
-    global _welcome_stage
+    global _welcome_stage, _current_flow_stage
     if len(args) < 2:
         print("welcome_stage_click requires: <hid_w> <hid_h>")
         return
     hid.calibrate(manual_size=(int(args[0]), int(args[1])))
 
+    _current_flow_stage = _welcome_stage
     scroll_down, scroll_up, click_y, label = WELCOME_STAGES[_welcome_stage]
     print(f"[welcome] stage {_welcome_stage}/{len(WELCOME_STAGES)-1}: {label}")
 
@@ -400,6 +408,7 @@ def main():
             x1, y1, x2, y2 = hid.make_roi_rect(h, w, ROI_X, ROI_Y, ROI_W, ROI_H)
             roi = frame[y1:y2, x1:x2]
             roi_resized = cv2.resize(roi, (OUTPUT_W, OUTPUT_H))
+            hid._last_frame = roi_resized
             display = roi_resized.copy()
 
             # --- Scene detection (1Hz) ---
@@ -418,6 +427,38 @@ def main():
                     toast_time = now
                     last_fsm_change = now
                     hid.notify_slack("welcome", prev_fsm_state, fsm_state)
+                    # --- Save to all trackers ---
+                    hid.save_full_test_frame(fsm_state, roi_resized)
+                    hid.save_subtotal_frame(fsm_state, roi_resized)
+                    # --- Subtotal (ANY → REWARD-NEXT) ---
+                    if fsm_state == S_REWARD_NEXT:
+                        if _current_flow_stage is not None:
+                            _completed_stages.add(_current_flow_stage)
+                        n_total = len(WELCOME_STAGES)
+                        lines = []
+                        for si, (_, _, _, slabel) in enumerate(WELCOME_STAGES):
+                            mark = "\u2705" if si in _completed_stages else "\u2b1c"
+                            tag = " \u2190 NOW" if si == _current_flow_stage else ""
+                            lines.append(f"{mark} {si}/{n_total-1}: {slabel}{tag}")
+                        progress = "\n".join(lines)
+                        if len(_completed_stages) >= n_total:
+                            progress += "\n\n\U0001f389 All Clear! Complete!"
+                        hid.send_subtotal_result("welcome", extra_msg=progress)
+                        hid.reset_subtotal()
+                    # --- Full test (INFORMATION-COMPLETE-DOWNLOAD → HOME) ---
+                    if (fsm_state == S_HOME
+                            and prev_fsm_state == S_INFORMATION_COMPLETE_DOWNLOAD):
+                        n_total = len(WELCOME_STAGES)
+                        lines = []
+                        for si, (_, _, _, slabel) in enumerate(WELCOME_STAGES):
+                            mark = "\u2705" if si in _completed_stages else "\u2b1c"
+                            lines.append(f"{mark} {si}/{n_total-1}: {slabel}")
+                        progress = "\n".join(lines)
+                        if len(_completed_stages) >= n_total:
+                            progress += "\n\n\U0001f389 All Clear! Complete!"
+                        hid.send_full_test_result("welcome", extra_msg=progress)
+                        hid.reset_full_test()
+                        _completed_stages.clear()
                     print(f"  [DEBUG] hid_enabled={hid_enabled} fsm_state={fsm_state} "
                           f"in_actions={fsm_state in FSM_ACTIONS}")
                     if hid_enabled and fsm_state in FSM_ACTIONS:
@@ -507,7 +548,9 @@ def main():
                 if mx < OUTPUT_W and hid_enabled:
                     xx = mx / OUTPUT_W
                     yy = my / OUTPUT_H
-                    print(f"  [CLICK] pct({xx:.3f}, {yy:.3f})")
+                    hid_x = int(args.hid_w * xx)
+                    hid_y = int(args.hid_h * yy)
+                    print(f"  [CLICK] pct({xx:.3f}, {yy:.3f})  hid({hid_x}, {hid_y})")
                     def do_click(px=xx, py=yy):
                         hid.calibrate(manual_size=(args.hid_w, args.hid_h))
                         hid.click_pct(px, py, repeat=1)

@@ -41,6 +41,8 @@ S_INFORMATION_COMPLETE_DOWNLOAD = "INFORMATION-COMPLETE-DOWNLOAD"
 S_INFORMATION_GACHA = "INFORMATION-GACHA"
 S_INFORMATION_WELCOME = "INFORMATION-WELCOME"
 S_INFORMATION_STRIKER_NAVI = "INFORMATION-STRIKER-NAVI"
+S_TUTORIAL_CLEAR = "TUTORIAL-CLEAR"
+S_INFORMATION_GIMIC2 = "INFORMATION-GIMIC2"
 
 # --------------- Transition table / Action mapping ---------------
 # Set from entry-point source before calling fsm_update().
@@ -95,6 +97,8 @@ SCENE_NAME_TO_STATE = {
     "information-gacha": S_INFORMATION_GACHA,
     "information-welcome": S_INFORMATION_WELCOME,
     "information-striker-navi": S_INFORMATION_STRIKER_NAVI,
+    "tutorial-clear": S_TUTORIAL_CLEAR,
+    "information-gimic2": S_INFORMATION_GIMIC2,
 }
 
 # --------------- Modal dialog states ---------------
@@ -113,6 +117,8 @@ MODAL_STATES = [
     S_INFORMATION_GACHA,
     S_INFORMATION_WELCOME,
     S_INFORMATION_STRIKER_NAVI,
+    S_TUTORIAL_CLEAR,
+    S_INFORMATION_GIMIC2,
 ]
 
 MODAL_FSM_ACTIONS = {s: s.lower().replace("-", "_") + "_ok" for s in MODAL_STATES}
