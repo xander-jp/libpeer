@@ -39,6 +39,7 @@ from onnxif import (
 )
 
 SAVE_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapshots")
+OBJ_TEMPLATES_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "obj_templates")
 
 # --- ROI config (matches: rpicam-still --roi 0.40,0.15,0.20,0.55) ---
 ROI_X = 0.442   # left offset (normalized)
@@ -351,6 +352,10 @@ def main():
     print(f"Using ONNX + sub-region pipeline ({len(onnx_labels)} classes, "
           f"{len(templates_region)} scenes with regions)")
 
+    print("Loading object templates...")
+    obj_templates = hid.load_obj_templates(OBJ_TEMPLATES_DIR)
+    print(f"Loaded {len(obj_templates)} object template type(s)")
+
     picam2 = Picamera2()
     config = picam2.create_video_configuration(
         main={"size": (CAP_W, CAP_H), "format": "RGB888"},
@@ -383,7 +388,9 @@ def main():
     last_play_turn = 0.0
     PLAY_TURN_INTERVAL = 5.0
     last_fsm_change = time.monotonic()
+    last_modal_cv_attempt = 0.0
     FSM_STUCK_TIMEOUT = 60.0
+    FSM_STUCK_TIMEOUT_MODAL = 60.0    # OBJ template detection
 
     try:
         while True:
@@ -440,6 +447,21 @@ def main():
                     print(f"  [FSM] retrigger {fsm_state} after {FSM_RETRIGGER_TIMEOUT:.0f}s")
                     _action_queue.put((FSM_ACTIONS[fsm_state], hid_args))
                     last_fsm_change = now
+                # Modal OBJ: stuck 60s → detect OK button via obj templates → click
+                if (hid_enabled
+                        and fsm_state != S_WELCOME_IN_PLAY
+                        and now - last_fsm_change >= FSM_STUCK_TIMEOUT_MODAL
+                        and now - last_modal_cv_attempt >= FSM_STUCK_TIMEOUT_MODAL
+                        and obj_templates
+                        and _worker_idle.is_set()):
+                    last_modal_cv_attempt = now
+                    obj_result = hid.detect_obj_in_frame(roi_resized, obj_templates)
+                    if obj_result:
+                        obj_name, cx_ok, cy_ok = obj_result
+                        print(f"  [FSM] OBJ {obj_name} at ({cx_ok:.3f}, {cy_ok:.3f}) — clicking")
+                        _action_queue.put(("cv_ok_click",
+                                           hid_args + [str(cx_ok), str(cy_ok)]))
+                        last_fsm_change = now
 
             # --- FPS ---
             frame_count += 1

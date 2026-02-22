@@ -322,6 +322,99 @@ def load_templates(snapshot_dir, scene_regions):
 
 
 # ============================================================
+#  Object template detection (sliding-window classify)
+# ============================================================
+
+def load_obj_templates(obj_dir):
+    """Load object templates from *obj_dir*.
+
+    Naming convention: ``{name}_{nn}.jpg``
+      e.g. ``bt-ok-modal-dialog_00.jpg``, ``bt-ok-modal-dialog_01.jpg``
+
+    Returns:
+        dict  name -> {"hists": [hist, ...], "w": int, "h": int}
+        *w* / *h* are average template pixel dimensions (used as ROI size).
+    """
+    raw = {}
+    for path in sorted(glob.glob(os.path.join(obj_dir, "*.jpg"))):
+        basename = os.path.splitext(os.path.basename(path))[0]
+        parts = basename.rsplit("_", 1)
+        if len(parts) == 2 and parts[1].isdigit():
+            name = parts[0]
+        else:
+            continue
+        img = cv2.imread(path)
+        if img is None:
+            continue
+        raw.setdefault(name, []).append(img)
+
+    result = {}
+    for name, imgs in raw.items():
+        hists = [calc_hist(img) for img in imgs]
+        avg_w = int(sum(img.shape[1] for img in imgs) / len(imgs))
+        avg_h = int(sum(img.shape[0] for img in imgs) / len(imgs))
+        result[name] = {"hists": hists, "w": avg_w, "h": avg_h}
+        print(f"  obj_template: {name:35s} x{len(imgs)}  size=({avg_w}x{avg_h})")
+    return result
+
+
+def detect_obj_in_frame(frame, obj_templates,
+                        dx_step=0.1, dy_step=0.3, threshold=0.5):
+    """Slide ROI windows across *frame* and classify against *obj_templates*.
+
+    The frame is tiled into ROI windows of size
+    ``(dx_step * fw, dy_step * fh)`` starting from the top-left corner.
+    Each ROI's HSV histogram is compared against every template histogram
+    (scale-invariant — template pixel size need not match ROI size).
+
+    Args:
+        frame:          input image (same format as roi_resized).
+        obj_templates:  dict returned by :func:`load_obj_templates`.
+        dx_step:        horizontal stride / ROI width as fraction of frame (default 0.1).
+        dy_step:        vertical   stride / ROI height as fraction of frame (default 0.3).
+        threshold:      minimum HSV-histogram correlation to accept.
+
+    Returns:
+        ``(name, cx, cy)`` with *cx* / *cy* normalised 0.0–1.0,
+        or ``None`` if nothing matched.
+    """
+    fh, fw = frame.shape[:2]
+    roi_w = max(1, int(fw * dx_step))
+    roi_h = max(1, int(fh * dy_step))
+
+    best = None
+    best_corr = threshold
+
+    ry = 0
+    while ry + roi_h <= fh:
+        rx = 0
+        while rx + roi_w <= fw:
+            crop = frame[ry:ry + roi_h, rx:rx + roi_w]
+            crop_hist = calc_hist(crop)
+
+            for name, info in obj_templates.items():
+                for tmpl_hist in info["hists"]:
+                    corr = cv2.compareHist(crop_hist, tmpl_hist,
+                                           cv2.HISTCMP_CORREL)
+                    if corr > best_corr:
+                        cx = (rx + roi_w / 2.0) / fw
+                        cy = (ry + roi_h / 2.0) / fh
+                        best = (name, cx, cy)
+                        best_corr = corr
+
+            rx += roi_w
+        ry += roi_h
+
+    if best is None:
+        print("  [OBJ] no object detected in frame")
+        return None
+
+    name, cx, cy = best
+    print(f"  [OBJ] detected: {name} at ({cx:.3f},{cy:.3f}) corr={best_corr:.3f}")
+    return best
+
+
+# ============================================================
 #  Screen capture / CV  (stub -- implement per environment)
 # ============================================================
 
@@ -765,6 +858,28 @@ def act_reward_next(args):
     reset_origin()
     print("[action] tap reward next (0.50, 0.98)")
     click_pct(0.50, 0.98, repeat=1)
+
+
+@action("cv_ok_click")
+def act_cv_ok_click(args):
+    """Click OK at CV-detected position.  <hid_w> <hid_h> <px> <py>"""
+    if len(args) < 4:
+        print("cv_ok_click requires: <hid_w> <hid_h> <px> <py>")
+        return
+    calibrate(manual_size=(int(args[0]), int(args[1])))
+    reset_origin()
+    px, py = float(args[2]), float(args[3])
+    print(f"[action] CV OK click at ({px:.3f}, {py:.3f})")
+    click_pct(px, py, repeat=1)
+    # Robustness: click 4 offset points (±1% of screen)
+    dw = int(screen_w * 0.01)
+    dh = int(screen_h * 0.01)
+    _send_batch([
+        f"0 0 {-dh}", "1 0 0", "0 0 0",
+        f"0 0 {2 * dh}", "1 0 0", "0 0 0",
+        f"0 {-dw} {-dh}", "1 0 0", "0 0 0",
+        f"0 {2 * dw} 0", "1 0 0", "0 0 0",
+    ])
 
 
 if __name__ == "__main__":
