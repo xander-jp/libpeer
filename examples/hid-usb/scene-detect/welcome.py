@@ -396,6 +396,7 @@ def main():
     last_play_turn = 0.0
     PLAY_TURN_INTERVAL = 5.0
     last_fsm_change = time.monotonic()
+    last_real_fsm_change = last_fsm_change
     last_modal_cv_attempt = 0.0
     FSM_STUCK_TIMEOUT = 60.0
     FSM_STUCK_TIMEOUT_MODAL = 60.0    # OBJ template detection
@@ -426,6 +427,7 @@ def main():
                     toast_text = fsm_state
                     toast_time = now
                     last_fsm_change = now
+                    last_real_fsm_change = now
                     hid.notify_slack("welcome", prev_fsm_state, fsm_state)
                     # --- Save to all trackers ---
                     hid.save_full_test_frame(fsm_state, roi_resized)
@@ -489,12 +491,20 @@ def main():
                     _action_queue.put((FSM_ACTIONS[fsm_state], hid_args))
                     last_fsm_change = now
                 # Modal OBJ: stuck 60s → detect OK button via obj templates → click
+                _dt_real = now - last_real_fsm_change
+                _dt_modal = now - last_modal_cv_attempt
+                if int(_dt_real) % 10 == 0 and int(_dt_real) > 0:
+                    print(f"  [OBJ-DBG] hid={hid_enabled} st={fsm_state} "
+                          f"dt_real={_dt_real:.0f}/{FSM_STUCK_TIMEOUT_MODAL:.0f} "
+                          f"dt_modal={_dt_modal:.0f}/{FSM_STUCK_TIMEOUT_MODAL:.0f} "
+                          f"tpl={len(obj_templates)} idle={_worker_idle.is_set()}")
                 if (hid_enabled
                         and fsm_state != S_WELCOME_IN_PLAY
-                        and now - last_fsm_change >= FSM_STUCK_TIMEOUT_MODAL
-                        and now - last_modal_cv_attempt >= FSM_STUCK_TIMEOUT_MODAL
+                        and _dt_real >= FSM_STUCK_TIMEOUT_MODAL
+                        and _dt_modal >= FSM_STUCK_TIMEOUT_MODAL
                         and obj_templates
                         and _worker_idle.is_set()):
+                    print(f"  [OBJ] calling detect_obj_in_frame (dt_real={_dt_real:.0f}s)")
                     last_modal_cv_attempt = now
                     obj_result = hid.detect_obj_in_frame(roi_resized, obj_templates)
                     if obj_result:
@@ -503,6 +513,7 @@ def main():
                         _action_queue.put(("cv_ok_click",
                                            hid_args + [str(cx_ok), str(cy_ok)]))
                         last_fsm_change = now
+                        last_real_fsm_change = now
 
             # --- FPS ---
             frame_count += 1

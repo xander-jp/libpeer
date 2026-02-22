@@ -641,19 +641,16 @@ def load_obj_templates(obj_dir):
 
 
 def detect_obj_in_frame(frame, obj_templates,
-                        dx_step=0.1, dy_step=0.3, threshold=0.5):
+                        win_w=0.25, win_h=0.05, overlap=0.5,
+                        threshold=0.5):
     """Slide ROI windows across *frame* and classify against *obj_templates*.
-
-    The frame is tiled into ROI windows of size
-    ``(dx_step * fw, dy_step * fh)`` starting from the top-left corner.
-    Each ROI's HSV histogram is compared against every template histogram
-    (scale-invariant — template pixel size need not match ROI size).
 
     Args:
         frame:          input image (same format as roi_resized).
         obj_templates:  dict returned by :func:`load_obj_templates`.
-        dx_step:        horizontal stride / ROI width as fraction of frame (default 0.1).
-        dy_step:        vertical   stride / ROI height as fraction of frame (default 0.3).
+        win_w:          ROI window width as fraction of frame width.
+        win_h:          ROI window height as fraction of frame height.
+        overlap:        overlap ratio (0.5 = 50% overlap, stride = win/2).
         threshold:      minimum HSV-histogram correlation to accept.
 
     Returns:
@@ -661,8 +658,10 @@ def detect_obj_in_frame(frame, obj_templates,
         or ``None`` if nothing matched.
     """
     fh, fw = frame.shape[:2]
-    roi_w = max(1, int(fw * dx_step))
-    roi_h = max(1, int(fh * dy_step))
+    roi_w = max(1, int(fw * win_w))
+    roi_h = max(1, int(fh * win_h))
+    stride_x = max(1, int(roi_w * (1.0 - overlap)))
+    stride_y = max(1, int(roi_h * (1.0 - overlap)))
 
     best = None
     best_corr = threshold
@@ -684,8 +683,8 @@ def detect_obj_in_frame(frame, obj_templates,
                         best = (name, cx, cy)
                         best_corr = corr
 
-            rx += roi_w
-        ry += roi_h
+            rx += stride_x
+        ry += stride_y
 
     if best is None:
         print("  [OBJ] no object detected in frame")
