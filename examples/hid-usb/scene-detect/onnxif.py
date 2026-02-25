@@ -45,9 +45,14 @@ def load_onnx_model(model_path, labels_path):
 
 
 def onnx_preprocess(frame):
-    """Preprocess frame for ONNX inference. Returns [1, N_FEATURES] float32."""
+    """Preprocess frame for ONNX inference. Returns [1, N_FEATURES] float32.
+
+    Converts to Canny edge image (single channel) to match train_onnx.py.
+    """
     resized = cv2.resize(frame, (ONNX_INPUT_W, ONNX_INPUT_H))
-    vec = resized.astype(np.float32).flatten() / 255.0
+    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+    vec = edges.astype(np.float32).flatten() / 255.0
     return vec.reshape(1, -1)
 
 

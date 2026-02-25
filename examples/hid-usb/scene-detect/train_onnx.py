@@ -1,10 +1,11 @@
 #!/usr/bin/env python3
-"""Train scene classifier MLP and export to ONNX.
+"""Train scene classifier CNN and export to ONNX.
 
 Usage:
-    python3 train_onnx.py [--epochs 300] [--aug 80] [--lr 0.005]
+    python3 train_onnx.py [--epochs 300] [--aug 500] [--lr 0.005]
 
-Reads snapshots from ./snapshots/, trains a small MLP, and writes:
+Reads snapshots from ./snapshots/, trains a tiny CNN on Canny edge images,
+and writes:
     scene_model.onnx   - ONNX inference model
     scene_labels.json  - ordered class labels
 """
@@ -25,10 +26,10 @@ LABELS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scene_la
 
 INPUT_W = 32
 INPUT_H = 64
-N_FEATURES = INPUT_W * INPUT_H * 3  # 6144
+N_FEATURES = INPUT_W * INPUT_H  # 2048 (single-channel Canny edge)
 
-HIDDEN1 = 128
-HIDDEN2 = 32
+CONV1_CH = 8
+CONV2_CH = 16
 
 SAMPLES_PER_CLASS = 500  # target augmented samples per class
 
@@ -55,9 +56,11 @@ def load_images(snapshot_dir):
 
 
 def preprocess(img):
-    """Resize and normalise image to feature vector [N_FEATURES]."""
+    """Resize, extract Canny edges, normalise to flat vector [N_FEATURES]."""
     resized = cv2.resize(img, (INPUT_W, INPUT_H))
-    return resized.astype(np.float32).flatten() / 255.0
+    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+    edges = cv2.Canny(gray, 50, 150)
+    return edges.astype(np.float32).flatten() / 255.0
 
 
 def augment(img, n):
@@ -210,7 +213,7 @@ def build_dataset(scenes, samples_per_class):
 
 
 # ============================================================
-#  Numpy MLP
+#  Numpy CNN helpers
 # ============================================================
 
 def relu(x):
@@ -230,61 +233,157 @@ def cross_entropy(pred, target):
     return -np.mean(np.sum(target * np.log(pred + 1e-8), axis=1))
 
 
-class SimpleMLP:
-    """3-layer MLP trained with mini-batch SGD."""
+def im2col(x, kh, kw, stride=1, pad=0):
+    """Convert 4D input (N,C,H,W) to column matrix for convolution."""
+    N, C, H, W = x.shape
+    out_h = (H + 2 * pad - kh) // stride + 1
+    out_w = (W + 2 * pad - kw) // stride + 1
+    if pad > 0:
+        x = np.pad(x, ((0, 0), (0, 0), (pad, pad), (pad, pad)),
+                   mode='constant')
+    col = np.zeros((N, C, kh, kw, out_h, out_w), dtype=x.dtype)
+    for j in range(kh):
+        j_end = j + stride * out_h
+        for i in range(kw):
+            i_end = i + stride * out_w
+            col[:, :, j, i, :, :] = x[:, :, j:j_end:stride, i:i_end:stride]
+    return col.transpose(0, 4, 5, 1, 2, 3).reshape(N * out_h * out_w, -1)
 
-    def __init__(self, in_dim, h1, h2, out_dim):
-        s1 = np.sqrt(2.0 / in_dim)
-        s2 = np.sqrt(2.0 / h1)
-        s3 = np.sqrt(2.0 / h2)
-        self.W1 = (np.random.randn(in_dim, h1) * s1).astype(np.float32)
-        self.b1 = np.zeros(h1, dtype=np.float32)
-        self.W2 = (np.random.randn(h1, h2) * s2).astype(np.float32)
-        self.b2 = np.zeros(h2, dtype=np.float32)
-        self.W3 = (np.random.randn(h2, out_dim) * s3).astype(np.float32)
-        self.b3 = np.zeros(out_dim, dtype=np.float32)
 
-    def forward(self, X):
-        self.X = X
-        self.z1 = X @ self.W1 + self.b1
-        self.a1 = relu(self.z1)
-        self.z2 = self.a1 @ self.W2 + self.b2
-        self.a2 = relu(self.z2)
-        self.z3 = self.a2 @ self.W3 + self.b3
-        self.out = softmax(self.z3)
+def col2im(col, x_shape, kh, kw, stride=1, pad=0):
+    """Reverse of im2col: scatter-add columns back to image tensor."""
+    N, C, H, W = x_shape
+    out_h = (H + 2 * pad - kh) // stride + 1
+    out_w = (W + 2 * pad - kw) // stride + 1
+    col = col.reshape(N, out_h, out_w, C, kh, kw).transpose(0, 3, 4, 5, 1, 2)
+    H_pad, W_pad = H + 2 * pad, W + 2 * pad
+    img = np.zeros((N, C, H_pad, W_pad), dtype=col.dtype)
+    for j in range(kh):
+        j_end = j + stride * out_h
+        for i in range(kw):
+            i_end = i + stride * out_w
+            img[:, :, j:j_end:stride, i:i_end:stride] += col[:, :, j, i, :, :]
+    if pad > 0:
+        return img[:, :, pad:-pad, pad:-pad]
+    return img
+
+
+class SimpleCNN:
+    """Tiny CNN: Conv(8) -> ReLU -> Conv(16) -> ReLU -> GlobalAvgPool -> FC"""
+
+    def __init__(self, out_dim):
+        # Conv1: 1 -> CONV1_CH, 3x3, pad=1
+        s1 = np.sqrt(2.0 / (1 * 3 * 3))
+        self.conv1_W = (np.random.randn(CONV1_CH, 1, 3, 3) * s1).astype(np.float32)
+        self.conv1_b = np.zeros(CONV1_CH, dtype=np.float32)
+        # Conv2: CONV1_CH -> CONV2_CH, 3x3, pad=1
+        s2 = np.sqrt(2.0 / (CONV1_CH * 3 * 3))
+        self.conv2_W = (np.random.randn(CONV2_CH, CONV1_CH, 3, 3) * s2).astype(np.float32)
+        self.conv2_b = np.zeros(CONV2_CH, dtype=np.float32)
+        # FC: CONV2_CH -> out_dim
+        s3 = np.sqrt(2.0 / CONV2_CH)
+        self.fc_W = (np.random.randn(CONV2_CH, out_dim) * s3).astype(np.float32)
+        self.fc_b = np.zeros(out_dim, dtype=np.float32)
+
+    def _conv_forward(self, x, W, b):
+        """Conv2d forward (3x3, pad=1). Returns (output, col_cache)."""
+        out_ch = W.shape[0]
+        N, _, H, W_in = x.shape
+        col = im2col(x, 3, 3, pad=1)
+        col_W = W.reshape(out_ch, -1).T  # (C_in*9, out_ch)
+        out_flat = col @ col_W + b
+        out = out_flat.reshape(N, H, W_in, out_ch).transpose(0, 3, 1, 2)
+        return out, col
+
+    def _conv_backward(self, dout, col, x_shape, W):
+        """Conv2d backward. Returns (dx, dW, db)."""
+        out_ch = W.shape[0]
+        N = dout.shape[0]
+        dout_flat = dout.transpose(0, 2, 3, 1).reshape(-1, out_ch)
+        dW = (col.T @ dout_flat).T.reshape(W.shape) / N
+        db = dout_flat.sum(axis=0) / N
+        dcol = dout_flat @ W.reshape(out_ch, -1)
+        dx = col2im(dcol, x_shape, 3, 3, pad=1)
+        return dx, dW, db
+
+    def forward(self, X_flat):
+        N = X_flat.shape[0]
+        x = X_flat.reshape(N, 1, INPUT_H, INPUT_W)
+
+        # Conv1 + ReLU
+        z1, self._col1 = self._conv_forward(x, self.conv1_W, self.conv1_b)
+        self._x_shape = x.shape
+        self._z1 = z1
+        a1 = relu(z1)
+
+        # Conv2 + ReLU
+        z2, self._col2 = self._conv_forward(a1, self.conv2_W, self.conv2_b)
+        self._a1_shape = a1.shape
+        self._z2 = z2
+        a2 = relu(z2)
+
+        # GlobalAvgPool -> (N, CONV2_CH)
+        self._a2 = a2
+        pooled = a2.mean(axis=(2, 3))
+
+        # FC + Softmax
+        self._pooled = pooled
+        z_fc = pooled @ self.fc_W + self.fc_b
+        self.out = softmax(z_fc)
         return self.out
 
     def backward(self, y_onehot, lr):
-        m = self.X.shape[0]
+        N = self.out.shape[0]
 
-        dz3 = self.out - y_onehot
-        dW3 = self.a2.T @ dz3 / m
-        db3 = dz3.mean(axis=0)
+        # FC backward
+        dz_fc = self.out - y_onehot
+        dW_fc = self._pooled.T @ dz_fc / N
+        db_fc = dz_fc.mean(axis=0)
+        d_pooled = dz_fc @ self.fc_W.T  # (N, CONV2_CH)
 
-        da2 = dz3 @ self.W3.T
-        dz2 = da2 * relu_deriv(self.z2)
-        dW2 = self.a1.T @ dz2 / m
-        db2 = dz2.mean(axis=0)
+        # GlobalAvgPool backward
+        _, C, H, W = self._a2.shape
+        d_a2 = d_pooled[:, :, np.newaxis, np.newaxis] \
+            * np.ones((1, 1, H, W), dtype=np.float32) / (H * W)
 
-        da1 = dz2 @ self.W2.T
-        dz1 = da1 * relu_deriv(self.z1)
-        dW1 = self.X.T @ dz1 / m
-        db1 = dz1.mean(axis=0)
+        # Conv2 backward
+        d_z2 = d_a2 * relu_deriv(self._z2)
+        d_a1, dW2, db2 = self._conv_backward(
+            d_z2, self._col2, self._a1_shape, self.conv2_W)
 
-        self.W3 -= lr * dW3
-        self.b3 -= lr * db3
-        self.W2 -= lr * dW2
-        self.b2 -= lr * db2
-        self.W1 -= lr * dW1
-        self.b1 -= lr * db1
+        # Conv1 backward
+        d_z1 = d_a1 * relu_deriv(self._z1)
+        _, dW1, db1 = self._conv_backward(
+            d_z1, self._col1, self._x_shape, self.conv1_W)
+
+        # Update weights
+        self.fc_W -= lr * dW_fc
+        self.fc_b -= lr * db_fc
+        self.conv2_W -= lr * dW2
+        self.conv2_b -= lr * db2
+        self.conv1_W -= lr * dW1
+        self.conv1_b -= lr * db1
 
 
-def train_mlp(X, y, n_classes, epochs, lr, batch_size=64):
-    """Train MLP and return model."""
+def predict_batched(model, X, batch_size=256):
+    """Run forward in batches to avoid OOM on large datasets."""
+    preds = []
+    for i in range(0, len(X), batch_size):
+        preds.append(model.forward(X[i:i + batch_size]))
+    return np.concatenate(preds, axis=0)
+
+
+def train_cnn(X, y, n_classes, epochs, lr, batch_size=64):
+    """Train CNN and return model."""
     y_onehot = np.zeros((len(y), n_classes), dtype=np.float32)
     y_onehot[np.arange(len(y)), y] = 1.0
 
-    mlp = SimpleMLP(X.shape[1], HIDDEN1, HIDDEN2, n_classes)
+    cnn = SimpleCNN(n_classes)
+
+    n_params = (cnn.conv1_W.size + cnn.conv1_b.size +
+                cnn.conv2_W.size + cnn.conv2_b.size +
+                cnn.fc_W.size + cnn.fc_b.size)
+    print(f"  Parameters: {n_params}")
 
     for epoch in range(epochs):
         indices = np.random.permutation(len(X))
@@ -296,57 +395,80 @@ def train_mlp(X, y, n_classes, epochs, lr, batch_size=64):
             X_b = X[batch_idx]
             y_b = y_onehot[batch_idx]
 
-            pred = mlp.forward(X_b)
+            pred = cnn.forward(X_b)
             total_loss += cross_entropy(pred, y_b)
-            mlp.backward(y_b, lr)
+            cnn.backward(y_b, lr)
             n_batches += 1
 
         if (epoch + 1) % 20 == 0 or epoch == 0:
-            pred_all = mlp.forward(X)
+            pred_all = predict_batched(cnn, X)
             acc = (pred_all.argmax(axis=1) == y).mean()
             print(f"  epoch {epoch+1:4d}/{epochs}  "
                   f"loss={total_loss / n_batches:.4f}  acc={acc:.4f}")
 
-    pred_all = mlp.forward(X)
+    pred_all = predict_batched(cnn, X)
     acc = (pred_all.argmax(axis=1) == y).mean()
     print(f"  final accuracy: {acc:.4f}")
-    return mlp
+    return cnn
 
 
 # ============================================================
 #  ONNX export
 # ============================================================
 
-def export_onnx(mlp, labels, path):
-    """Export trained MLP to ONNX."""
+def export_onnx(cnn, labels, path):
+    """Export trained CNN to ONNX."""
     import onnx
     from onnx import helper, TensorProto, numpy_helper
 
-    W1 = numpy_helper.from_array(mlp.W1, name="W1")
-    b1 = numpy_helper.from_array(mlp.b1, name="b1")
-    W2 = numpy_helper.from_array(mlp.W2, name="W2")
-    b2 = numpy_helper.from_array(mlp.b2, name="b2")
-    W3 = numpy_helper.from_array(mlp.W3, name="W3")
-    b3 = numpy_helper.from_array(mlp.b3, name="b3")
+    n_classes = len(labels)
 
-    X_in = helper.make_tensor_value_info("input", TensorProto.FLOAT, [1, N_FEATURES])
-    Y_out = helper.make_tensor_value_info("output", TensorProto.FLOAT, [1, len(labels)])
+    # Initializers
+    conv1_W = numpy_helper.from_array(cnn.conv1_W, name="conv1_W")
+    conv1_b = numpy_helper.from_array(cnn.conv1_b, name="conv1_b")
+    conv2_W = numpy_helper.from_array(cnn.conv2_W, name="conv2_W")
+    conv2_b = numpy_helper.from_array(cnn.conv2_b, name="conv2_b")
+    fc_W = numpy_helper.from_array(cnn.fc_W, name="fc_W")
+    fc_b = numpy_helper.from_array(cnn.fc_b, name="fc_b")
+
+    shape_4d = numpy_helper.from_array(
+        np.array([1, 1, INPUT_H, INPUT_W], dtype=np.int64), name="shape_4d")
+    shape_2d = numpy_helper.from_array(
+        np.array([1, CONV2_CH], dtype=np.int64), name="shape_2d")
+
+    X_in = helper.make_tensor_value_info(
+        "input", TensorProto.FLOAT, [1, N_FEATURES])
+    Y_out = helper.make_tensor_value_info(
+        "output", TensorProto.FLOAT, [1, n_classes])
 
     nodes = [
-        helper.make_node("Gemm", ["input", "W1", "b1"], ["z1"], transB=0),
+        # Reshape flat edge vector to 4D: [1, 1, H, W]
+        helper.make_node("Reshape", ["input", "shape_4d"], ["x_4d"]),
+        # Conv1 + ReLU
+        helper.make_node("Conv", ["x_4d", "conv1_W", "conv1_b"], ["z1"],
+                         kernel_shape=[3, 3], pads=[1, 1, 1, 1]),
         helper.make_node("Relu", ["z1"], ["a1"]),
-        helper.make_node("Gemm", ["a1", "W2", "b2"], ["z2"], transB=0),
+        # Conv2 + ReLU
+        helper.make_node("Conv", ["a1", "conv2_W", "conv2_b"], ["z2"],
+                         kernel_shape=[3, 3], pads=[1, 1, 1, 1]),
         helper.make_node("Relu", ["z2"], ["a2"]),
-        helper.make_node("Gemm", ["a2", "W3", "b3"], ["z3"], transB=0),
-        helper.make_node("Softmax", ["z3"], ["output"], axis=1),
+        # GlobalAveragePool -> Reshape to 2D
+        helper.make_node("GlobalAveragePool", ["a2"], ["pooled_4d"]),
+        helper.make_node("Reshape", ["pooled_4d", "shape_2d"], ["pooled"]),
+        # FC + Softmax
+        helper.make_node("Gemm", ["pooled", "fc_W", "fc_b"], ["logits"],
+                         transB=0),
+        helper.make_node("Softmax", ["logits"], ["output"], axis=1),
     ]
 
     graph = helper.make_graph(
         nodes, "scene_classifier",
         [X_in], [Y_out],
-        initializer=[W1, b1, W2, b2, W3, b3],
+        initializer=[conv1_W, conv1_b, conv2_W, conv2_b,
+                      fc_W, fc_b, shape_4d, shape_2d],
     )
-    model = helper.make_model(graph, opset_imports=[helper.make_opsetid("", 13)])
+    model = helper.make_model(
+        graph, opset_imports=[helper.make_opsetid("", 13)])
     model.ir_version = 8
 
     onnx.checker.check_model(model)
@@ -359,7 +481,7 @@ def export_onnx(mlp, labels, path):
 # ============================================================
 
 def main():
-    parser = argparse.ArgumentParser(description="Train scene classifier → ONNX")
+    parser = argparse.ArgumentParser(description="Train scene classifier -> ONNX")
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--aug", type=int, default=SAMPLES_PER_CLASS,
                         help="target samples per class after augmentation")
@@ -367,8 +489,8 @@ def main():
     parser.add_argument("--batch", type=int, default=64)
     args = parser.parse_args()
 
-    print(f"Input: {INPUT_W}x{INPUT_H}x3 = {N_FEATURES} features")
-    print(f"MLP: {N_FEATURES} → {HIDDEN1} → {HIDDEN2} → N_classes")
+    print(f"Input: {INPUT_W}x{INPUT_H} Canny edge = {N_FEATURES} features")
+    print(f"CNN: Conv({CONV1_CH})->ReLU->Conv({CONV2_CH})->ReLU->GAP->FC")
     print(f"Epochs: {args.epochs}  LR: {args.lr}  Batch: {args.batch}")
     print()
 
@@ -392,13 +514,13 @@ def main():
 
     print("Training...")
     t0 = time.monotonic()
-    mlp = train_mlp(X, y, n_classes, args.epochs, args.lr, args.batch)
+    cnn = train_cnn(X, y, n_classes, args.epochs, args.lr, args.batch)
     elapsed = time.monotonic() - t0
     print(f"Training took {elapsed:.1f}s")
     print()
 
     # Per-class accuracy
-    pred_all = mlp.forward(X)
+    pred_all = predict_batched(cnn, X)
     pred_labels = pred_all.argmax(axis=1)
     for i, name in enumerate(labels):
         mask = y == i
@@ -408,7 +530,7 @@ def main():
         print(f"  {name:35s} acc={cls_acc:.4f}  (n={mask.sum()})")
     print()
 
-    export_onnx(mlp, labels, MODEL_PATH)
+    export_onnx(cnn, labels, MODEL_PATH)
 
     with open(LABELS_PATH, "w") as f:
         json.dump(labels, f, indent=2)
@@ -422,7 +544,7 @@ def main():
     result = sess.run(None, {"input": test_input})
     probs = result[0][0]
     top_idx = probs.argmax()
-    print(f"  test input → {labels[top_idx]} ({probs[top_idx]:.4f})")
+    print(f"  test input -> {labels[top_idx]} ({probs[top_idx]:.4f})")
     print("Done.")
 
 
