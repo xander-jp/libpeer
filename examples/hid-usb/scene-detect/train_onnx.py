@@ -32,6 +32,9 @@ N_FEATURES = INPUT_W * INPUT_H * INPUT_CH  # 6144 (RGB)
 CONV1_CH = 16
 CONV2_CH = 32
 CONV3_CH = 64
+FC1_DIM = 256
+# After 3x stride-2 convs: H/8 x W/8
+FLATTEN_DIM = CONV3_CH * (INPUT_H // 8) * (INPUT_W // 8)  # 64*8*4 = 2048
 
 SAMPLES_PER_CLASS = 500  # target augmented samples per class
 
@@ -275,7 +278,7 @@ def col2im(col, x_shape, kh, kw, stride=1, pad=0):
 
 
 class SimpleCNN:
-    """Conv(16)->ReLU->Conv(32)->ReLU->Conv(64)->ReLU->GAP->FC"""
+    """Conv(16)->Conv(32)->Conv(64)->Flatten->FC(256)->FC(n_classes)"""
 
     def __init__(self, out_dim):
         # Conv1: INPUT_CH -> CONV1_CH, 3x3, pad=1
@@ -290,10 +293,14 @@ class SimpleCNN:
         s3 = np.sqrt(2.0 / (CONV2_CH * 3 * 3))
         self.conv3_W = (np.random.randn(CONV3_CH, CONV2_CH, 3, 3) * s3).astype(np.float32)
         self.conv3_b = np.zeros(CONV3_CH, dtype=np.float32)
-        # FC: CONV3_CH -> out_dim
-        s4 = np.sqrt(2.0 / CONV3_CH)
-        self.fc_W = (np.random.randn(CONV3_CH, out_dim) * s4).astype(np.float32)
-        self.fc_b = np.zeros(out_dim, dtype=np.float32)
+        # FC1: FLATTEN_DIM -> FC1_DIM
+        s4 = np.sqrt(2.0 / FLATTEN_DIM)
+        self.fc1_W = (np.random.randn(FLATTEN_DIM, FC1_DIM) * s4).astype(np.float32)
+        self.fc1_b = np.zeros(FC1_DIM, dtype=np.float32)
+        # FC2: FC1_DIM -> out_dim
+        s5 = np.sqrt(2.0 / FC1_DIM)
+        self.fc2_W = (np.random.randn(FC1_DIM, out_dim) * s5).astype(np.float32)
+        self.fc2_b = np.zeros(out_dim, dtype=np.float32)
 
     def _conv_forward(self, x, W, b, stride=1):
         """Conv2d forward (3x3, pad=1). Returns (output, col_cache)."""
@@ -340,29 +347,39 @@ class SimpleCNN:
         self._z3 = z3
         a3 = relu(z3)
 
-        # GlobalAvgPool -> (N, CONV3_CH)
-        self._a3 = a3
-        pooled = a3.mean(axis=(2, 3))
+        # Flatten -> (N, FLATTEN_DIM)
+        self._a3_shape = a3.shape
+        flat = a3.reshape(N, -1)
 
-        # FC + Softmax
-        self._pooled = pooled
-        z_fc = pooled @ self.fc_W + self.fc_b
-        self.out = softmax(z_fc)
+        # FC1 + ReLU
+        self._flat = flat
+        z_fc1 = flat @ self.fc1_W + self.fc1_b
+        self._z_fc1 = z_fc1
+        a_fc1 = relu(z_fc1)
+
+        # FC2 + Softmax
+        self._a_fc1 = a_fc1
+        z_fc2 = a_fc1 @ self.fc2_W + self.fc2_b
+        self.out = softmax(z_fc2)
         return self.out
 
     def backward(self, y_onehot, lr):
         N = self.out.shape[0]
 
-        # FC backward
-        dz_fc = self.out - y_onehot
-        dW_fc = self._pooled.T @ dz_fc / N
-        db_fc = dz_fc.mean(axis=0)
-        d_pooled = dz_fc @ self.fc_W.T  # (N, CONV3_CH)
+        # FC2 backward
+        dz_fc2 = self.out - y_onehot
+        dW_fc2 = self._a_fc1.T @ dz_fc2 / N
+        db_fc2 = dz_fc2.mean(axis=0)
+        d_a_fc1 = dz_fc2 @ self.fc2_W.T
 
-        # GlobalAvgPool backward
-        _, C, H, W = self._a3.shape
-        d_a3 = d_pooled[:, :, np.newaxis, np.newaxis] \
-            * np.ones((1, 1, H, W), dtype=np.float32) / (H * W)
+        # FC1 backward
+        d_z_fc1 = d_a_fc1 * relu_deriv(self._z_fc1)
+        dW_fc1 = self._flat.T @ d_z_fc1 / N
+        db_fc1 = d_z_fc1.mean(axis=0)
+        d_flat = d_z_fc1 @ self.fc1_W.T
+
+        # Unflatten -> Conv3 shape
+        d_a3 = d_flat.reshape(self._a3_shape)
 
         # Conv3 backward (stride=2)
         d_z3 = d_a3 * relu_deriv(self._z3)
@@ -380,8 +397,10 @@ class SimpleCNN:
             d_z1, self._col1, self._x_shape, self.conv1_W, stride=2)
 
         # Update weights
-        self.fc_W -= lr * dW_fc
-        self.fc_b -= lr * db_fc
+        self.fc2_W -= lr * dW_fc2
+        self.fc2_b -= lr * db_fc2
+        self.fc1_W -= lr * dW_fc1
+        self.fc1_b -= lr * db_fc1
         self.conv3_W -= lr * dW3
         self.conv3_b -= lr * db3
         self.conv2_W -= lr * dW2
@@ -408,7 +427,8 @@ def train_cnn(X, y, n_classes, epochs, lr, batch_size=64):
     n_params = (cnn.conv1_W.size + cnn.conv1_b.size +
                 cnn.conv2_W.size + cnn.conv2_b.size +
                 cnn.conv3_W.size + cnn.conv3_b.size +
-                cnn.fc_W.size + cnn.fc_b.size)
+                cnn.fc1_W.size + cnn.fc1_b.size +
+                cnn.fc2_W.size + cnn.fc2_b.size)
     print(f"  Parameters: {n_params}")
 
     for epoch in range(epochs):
@@ -456,13 +476,13 @@ def export_onnx(cnn, labels, path):
     conv2_b = numpy_helper.from_array(cnn.conv2_b, name="conv2_b")
     conv3_W = numpy_helper.from_array(cnn.conv3_W, name="conv3_W")
     conv3_b = numpy_helper.from_array(cnn.conv3_b, name="conv3_b")
-    fc_W = numpy_helper.from_array(cnn.fc_W, name="fc_W")
-    fc_b = numpy_helper.from_array(cnn.fc_b, name="fc_b")
+    fc1_W = numpy_helper.from_array(cnn.fc1_W, name="fc1_W")
+    fc1_b = numpy_helper.from_array(cnn.fc1_b, name="fc1_b")
+    fc2_W = numpy_helper.from_array(cnn.fc2_W, name="fc2_W")
+    fc2_b = numpy_helper.from_array(cnn.fc2_b, name="fc2_b")
 
     shape_4d = numpy_helper.from_array(
         np.array([1, INPUT_CH, INPUT_H, INPUT_W], dtype=np.int64), name="shape_4d")
-    shape_2d = numpy_helper.from_array(
-        np.array([1, CONV3_CH], dtype=np.int64), name="shape_2d")
 
     X_in = helper.make_tensor_value_info(
         "input", TensorProto.FLOAT, [1, N_FEATURES])
@@ -487,11 +507,14 @@ def export_onnx(cnn, labels, path):
                          kernel_shape=[3, 3], pads=[1, 1, 1, 1],
                          strides=[2, 2]),
         helper.make_node("Relu", ["z3"], ["a3"]),
-        # GlobalAveragePool -> Reshape to 2D
-        helper.make_node("GlobalAveragePool", ["a3"], ["pooled_4d"]),
-        helper.make_node("Reshape", ["pooled_4d", "shape_2d"], ["pooled"]),
-        # FC + Softmax
-        helper.make_node("Gemm", ["pooled", "fc_W", "fc_b"], ["logits"],
+        # Flatten
+        helper.make_node("Flatten", ["a3"], ["flat"], axis=1),
+        # FC1 + ReLU
+        helper.make_node("Gemm", ["flat", "fc1_W", "fc1_b"], ["z_fc1"],
+                         transB=0),
+        helper.make_node("Relu", ["z_fc1"], ["a_fc1"]),
+        # FC2 + Softmax
+        helper.make_node("Gemm", ["a_fc1", "fc2_W", "fc2_b"], ["logits"],
                          transB=0),
         helper.make_node("Softmax", ["logits"], ["output"], axis=1),
     ]
@@ -500,7 +523,8 @@ def export_onnx(cnn, labels, path):
         nodes, "scene_classifier",
         [X_in], [Y_out],
         initializer=[conv1_W, conv1_b, conv2_W, conv2_b,
-                      conv3_W, conv3_b, fc_W, fc_b, shape_4d, shape_2d],
+                      conv3_W, conv3_b, fc1_W, fc1_b, fc2_W, fc2_b,
+                      shape_4d],
     )
     model = helper.make_model(
         graph, opset_imports=[helper.make_opsetid("", 13)])
@@ -525,7 +549,7 @@ def main():
     args = parser.parse_args()
 
     print(f"Input: {INPUT_W}x{INPUT_H}x{INPUT_CH} RGB = {N_FEATURES} features")
-    print(f"CNN: Conv({CONV1_CH})->ReLU->Conv({CONV2_CH})->ReLU->Conv({CONV3_CH})->ReLU->GAP->FC")
+    print(f"CNN: Conv({CONV1_CH})->Conv({CONV2_CH})->Conv({CONV3_CH})->Flatten({FLATTEN_DIM})->FC({FC1_DIM})->FC(n_classes)")
     print(f"Epochs: {args.epochs}  LR: {args.lr}  Batch: {args.batch}")
     print()
 
