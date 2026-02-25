@@ -177,9 +177,9 @@ def fsm_update(state, scores):
     candidate = _evaluate_state_onnx(scores)
     if state == S_QUEST and candidate == S_NORMAL_QUEST_UIJIN:
         candidate = S_NORMAL_QUEST
-    # output logging when difference candidate
-    if candidate != state:
-        print(f"  [FSM] candidate={candidate} ({_fsm_pending_count}/{FSM_CONFIRM_COUNT})")
+    # # output logging when difference candidate
+    # if candidate != state:
+    #     print(f"  [FSM] candidate={candidate} ({_fsm_pending_count}/{FSM_CONFIRM_COUNT})")
     if candidate == state:
         _fsm_pending = None
         _fsm_pending_count = 0
@@ -199,7 +199,7 @@ def fsm_update(state, scores):
         return state, False
 
     # candidate not allowed — reset pending
-    print(f"  [FSM] BLOCKED: {candidate} (allowed={allowed})")
+    # print(f"  [FSM] BLOCKED: {candidate} (allowed={allowed})")
     _fsm_pending = None
     _fsm_pending_count = 0
     return state, False

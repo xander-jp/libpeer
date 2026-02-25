@@ -34,6 +34,7 @@ from moorefsm import (
 )
 from barchart import (
     CHART_W, TOAST_DURATION, draw_chart, draw_toast, draw_region_boxes,
+    draw_obj_windows,
 )
 from onnxif import (
     ONNX_MODEL_PATH, ONNX_LABELS_PATH, load_onnx_model, onnx_classify,
@@ -178,6 +179,7 @@ FSM_TRANSITIONS = {
     S_UNKNOWN:                  _SCENE_STATES + MODAL_STATES,
     # --- normal flow (each also allows any modal) ---
     S_HOME:                     [S_EVENT, S_NORMAL_QUEST_UIJIN] + MODAL_STATES,
+    S_QUEST:                    [S_NORMAL_QUEST, S_EVENT, S_HOME] + MODAL_STATES,
     S_EVENT:                    [S_NORMAL_QUEST] + MODAL_STATES,
     S_NORMAL_QUEST:             [S_NORMAL_QUEST_UIJIN] + MODAL_STATES,
     S_NORMAL_QUEST_UIJIN:      [S_NORMAL_QUEST_UIJIN_KARYU] + MODAL_STATES,
@@ -398,6 +400,9 @@ def main():
     last_fsm_change = time.monotonic()
     last_real_fsm_change = last_fsm_change
     last_modal_cv_attempt = 0.0
+    last_obj_info = None              # latest detect_obj_in_frame result for debug overlay
+    last_obj_info_time = 0.0          # monotonic time when last_obj_info was set
+    OBJ_TOAST_DURATION = 10.0         # auto-clear debug overlay after N seconds
     FSM_STUCK_TIMEOUT = 60.0
     FSM_STUCK_TIMEOUT_MODAL = 60.0    # OBJ template detection
 
@@ -506,12 +511,20 @@ def main():
                         and _worker_idle.is_set()):
                     print(f"  [OBJ] calling detect_obj_in_frame (dt_real={_dt_real:.0f}s)")
                     last_modal_cv_attempt = now
-                    obj_result = hid.detect_obj_in_frame(roi_resized, obj_templates)
-                    if obj_result:
-                        obj_name, cx_ok, cy_ok = obj_result
-                        print(f"  [FSM] OBJ {obj_name} at ({cx_ok:.3f}, {cy_ok:.3f}) — clicking")
-                        _action_queue.put(("cv_ok_click",
-                                           hid_args + [str(cx_ok), str(cy_ok)]))
+                    last_obj_info = hid.detect_obj_in_frame(roi_resized, obj_templates,
+                                                                threshold=0.8)
+                    last_obj_info_time = now
+                    if last_obj_info["match"]:
+                        obj_name, cx_ok, cy_ok = last_obj_info["match"]
+                        # Convert ROI-relative coords to full-screen coords
+                        sx = ROI_X + cx_ok * ROI_W
+                        sy = ROI_Y + cy_ok * ROI_H
+                        if cy_ok >= 0.925:
+                            print(f"  [FSM] OBJ {obj_name} roi=({cx_ok:.3f}, {cy_ok:.3f}) screen=({sx:.3f}, {sy:.3f}) — skip (cy >= 0.925)")
+                        else:
+                            print(f"  [FSM] OBJ {obj_name} roi=({cx_ok:.3f}, {cy_ok:.3f}) screen=({sx:.3f}, {sy:.3f}) — clicking")
+                            _action_queue.put(("cv_ok_click",
+                                               hid_args + [str(sx), str(sy)]))
                         last_fsm_change = now
                         last_real_fsm_change = now
 
@@ -541,6 +554,10 @@ def main():
             candidate_scene = scores[0][0] if scores and scores[0][1] >= ONNX_CONF_LOW else None
             draw_region_boxes(display, fsm_state, SCENE_REGIONS, OUTPUT_W, OUTPUT_H,
                               candidate_scene=candidate_scene)
+            # Auto-clear OBJ debug overlay after 10s (toast)
+            if last_obj_info is not None and now - last_obj_info_time >= OBJ_TOAST_DURATION:
+                last_obj_info = None
+            draw_obj_windows(display, last_obj_info)
             if toast_text:
                 draw_toast(display, toast_text, now - toast_time)
                 if now - toast_time >= TOAST_DURATION:

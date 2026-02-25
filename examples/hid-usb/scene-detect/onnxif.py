@@ -2,6 +2,7 @@
 
 import json
 import os
+import time
 
 import cv2
 import numpy as np
@@ -67,13 +68,17 @@ def onnx_classify(frame, session, labels, scene_regions,
     Returns [(scene_name, score), ...] sorted desc.
     """
     # --- Stage 1: ONNX ---
+    t0 = time.monotonic()
     features = onnx_preprocess(frame)
     probs = session.run(None, {"input": features})[0][0]
     score_map = {labels[i]: float(probs[i]) for i in range(len(labels))
                  if labels[i] in scene_regions}
+    t1 = time.monotonic()
+    print(f"  [PERF] ONNX inference: {(t1 - t0)*1000:.1f}ms")
 
     # --- Stage 2: sub-region template matching ---
     if templates_region:
+        t2 = time.monotonic()
         # Sort to find top-N for region check
         ranked = sorted(score_map.items(), key=lambda x: x[1], reverse=True)
         for name, base_score in ranked[:REGION_TOP_N]:
@@ -99,6 +104,8 @@ def onnx_classify(frame, session, labels, scene_regions,
 
             adj = sum(adjustments) / n_regions
             score_map[name] = max(0.0, min(1.0, base_score + adj))
+        t3 = time.monotonic()
+        print(f"  [PERF] sub-region matching: {(t3 - t2)*1000:.1f}ms")
 
     results = sorted(score_map.items(), key=lambda x: x[1], reverse=True)
     return results

@@ -371,9 +371,9 @@ def send(op: int, x: int, y: int, delay: float = MOVE_DELAY):
     _seq += 1
     url = _api_url()
     payload = {"type": "mouse", "command": f"{op} {x} {y}", "seq": f"{_seq}"}
-    print(f"  [API] POST {url} {payload}")
+    # print(f"  [API] POST {url} {payload}")
     resp = requests.post(url, json=payload)
-    print(f"  [API] -> {resp.status_code}")
+    # print(f"  [API] -> {resp.status_code}")
     if delay > 0:
         time.sleep(delay)
 
@@ -384,7 +384,7 @@ def _send_batch(commands: list):
     payload = {"type": "mouse", "commands": commands, "p": pad}
     url = _api_url()
     resp = requests.post(url, json=payload)
-    print(f"  [API] POST {url} batch={len(commands)} pad={len(pad)} -> {resp.status_code}")
+    # print(f"  [API] POST {url} batch={len(commands)} pad={len(pad)} -> {resp.status_code}")
 
 
 def _chunked_move(op: int, dx: int, dy: int):
@@ -654,8 +654,11 @@ def detect_obj_in_frame(frame, obj_templates,
         threshold:      minimum HSV-histogram correlation to accept.
 
     Returns:
-        ``(name, cx, cy)`` with *cx* / *cy* normalised 0.0–1.0,
-        or ``None`` if nothing matched.
+        dict with keys:
+          "match":  ``(name, cx, cy)`` or ``None``
+          "best_corr": float
+          "windows": list of ``(rx, ry, rw, rh, corr)`` — all windows (pixel coords)
+          "best_idx": index into *windows* for best, or -1
     """
     fh, fw = frame.shape[:2]
     roi_w = max(1, int(fw * win_w))
@@ -665,34 +668,47 @@ def detect_obj_in_frame(frame, obj_templates,
 
     best = None
     best_corr = threshold
+    best_idx = -1
+    windows = []
 
-    ry = 0
+    # Random initial offset (0–10% of window) so each call samples
+    # different positions, making detection more robust against noise.
+    off_x = random.randint(0, max(1, int(roi_w * 0.1)))
+    off_y = random.randint(0, max(1, int(roi_h * 0.1)))
+
+    ry = off_y
     while ry + roi_h <= fh:
-        rx = 0
+        rx = off_x
         while rx + roi_w <= fw:
             crop = frame[ry:ry + roi_h, rx:rx + roi_w]
             crop_hist = calc_hist(crop)
 
+            win_best_corr = 0.0
             for name, info in obj_templates.items():
                 for tmpl_hist in info["hists"]:
                     corr = cv2.compareHist(crop_hist, tmpl_hist,
                                            cv2.HISTCMP_CORREL)
+                    if corr > win_best_corr:
+                        win_best_corr = corr
                     if corr > best_corr:
                         cx = (rx + roi_w / 2.0) / fw
                         cy = (ry + roi_h / 2.0) / fh
                         best = (name, cx, cy)
                         best_corr = corr
+                        best_idx = len(windows)
 
+            windows.append((rx, ry, roi_w, roi_h, win_best_corr))
             rx += stride_x
         ry += stride_y
 
     if best is None:
         print("  [OBJ] no object detected in frame")
-        return None
+    else:
+        name, cx, cy = best
+        print(f"  [OBJ] detected: {name} at ({cx:.3f},{cy:.3f}) corr={best_corr:.3f}")
 
-    name, cx, cy = best
-    print(f"  [OBJ] detected: {name} at ({cx:.3f},{cy:.3f}) corr={best_corr:.3f}")
-    return best
+    return {"match": best, "best_corr": best_corr,
+            "windows": windows, "best_idx": best_idx}
 
 
 # ============================================================

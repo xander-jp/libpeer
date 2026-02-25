@@ -103,3 +103,40 @@ def draw_region_boxes(display, fsm_state, scene_regions, output_w, output_h,
             x2 = int(output_w * (rx + rw))
             y2 = int(output_h * (ry + rh))
             cv2.rectangle(display, (x1, y1), (x2, y2), (0, 255, 0), 2)
+
+
+def draw_obj_windows(display, obj_info, alpha=0.5):
+    """Draw sliding-window debug overlay from detect_obj_in_frame result.
+
+    Args:
+        display: BGR image to draw on (modified in-place).
+        obj_info: dict returned by detect_obj_in_frame
+                  (keys: windows, best_idx, match, best_corr).
+        alpha: overlay opacity (0.0–1.0).
+    """
+    if obj_info is None:
+        return
+    windows = obj_info.get("windows", [])
+    best_idx = obj_info.get("best_idx", -1)
+    if not windows:
+        return
+
+    overlay = display.copy()
+    for i, (rx, ry, rw, rh, corr) in enumerate(windows):
+        if i == best_idx:
+            continue
+        # green fill so overlapping regions become visibly darker
+        cv2.rectangle(overlay, (rx, ry), (rx + rw, ry + rh), (0, 80, 0), -1)
+        cv2.rectangle(overlay, (rx, ry), (rx + rw, ry + rh), (0, 200, 0), 1)
+        cv2.putText(overlay, f"{corr:.2f}", (rx + 2, ry + rh - 3),
+                    cv2.FONT_HERSHEY_PLAIN, 0.7, (0, 200, 0), 1)
+
+    if best_idx >= 0:
+        rx, ry, rw, rh, corr = windows[best_idx]
+        cv2.rectangle(overlay, (rx, ry), (rx + rw, ry + rh), (0, 0, 180), -1)
+        cv2.rectangle(overlay, (rx, ry), (rx + rw, ry + rh), (0, 0, 255), 2)
+        label = obj_info["match"][0] if obj_info.get("match") else ""
+        cv2.putText(overlay, f"{label} {corr:.3f}", (rx + 2, ry + rh - 3),
+                    cv2.FONT_HERSHEY_PLAIN, 0.8, (0, 0, 255), 1)
+
+    cv2.addWeighted(overlay, alpha, display, 1.0 - alpha, 0, display)

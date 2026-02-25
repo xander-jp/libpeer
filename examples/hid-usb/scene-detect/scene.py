@@ -28,6 +28,7 @@ from moorefsm import (
 )
 from barchart import (
     CHART_W, TOAST_DURATION, draw_chart, draw_toast, draw_region_boxes,
+    draw_obj_windows,
 )
 from onnxif import (
     ONNX_MODEL_PATH, ONNX_LABELS_PATH, load_onnx_model, onnx_classify,
@@ -296,6 +297,7 @@ def main():
     last_fsm_change = time.monotonic()
     last_real_fsm_change = last_fsm_change
     last_modal_cv_attempt = 0.0
+    last_obj_info = None              # latest detect_obj_in_frame result for debug overlay
     FSM_STUCK_TIMEOUT = 30.0
     FSM_STUCK_TIMEOUT_MODAL = 60.0    # CV-based OK button detection
 
@@ -371,12 +373,18 @@ def main():
                         and _worker_idle.is_set()):
                     print(f"  [OBJ] calling detect_obj_in_frame (dt_real={_dt_real:.0f}s)")
                     last_modal_cv_attempt = now
-                    obj_result = hid.detect_obj_in_frame(roi_resized, obj_templates)
-                    if obj_result:
-                        obj_name, cx_ok, cy_ok = obj_result
-                        print(f"  [FSM] OBJ {obj_name} at ({cx_ok:.3f}, {cy_ok:.3f}) — clicking")
-                        _action_queue.put(("cv_ok_click",
-                                           hid_args + [str(cx_ok), str(cy_ok)]))
+                    last_obj_info = hid.detect_obj_in_frame(roi_resized, obj_templates)
+                    if last_obj_info["match"]:
+                        obj_name, cx_ok, cy_ok = last_obj_info["match"]
+                        # Convert ROI-relative coords to full-screen coords
+                        sx = ROI_X + cx_ok * ROI_W
+                        sy = ROI_Y + cy_ok * ROI_H
+                        if cy_ok >= 0.925:
+                            print(f"  [FSM] OBJ {obj_name} roi=({cx_ok:.3f}, {cy_ok:.3f}) screen=({sx:.3f}, {sy:.3f}) — skip (cy >= 0.925)")
+                        else:
+                            print(f"  [FSM] OBJ {obj_name} roi=({cx_ok:.3f}, {cy_ok:.3f}) screen=({sx:.3f}, {sy:.3f}) — clicking")
+                            _action_queue.put(("cv_ok_click",
+                                               hid_args + [str(sx), str(sy)]))
                         last_fsm_change = now
                         last_real_fsm_change = now
 
@@ -406,21 +414,7 @@ def main():
             candidate_scene = scores[0][0] if scores and scores[0][1] >= ONNX_CONF_LOW else None
             draw_region_boxes(display, fsm_state, SCENE_REGIONS, OUTPUT_W, OUTPUT_H,
                               candidate_scene=candidate_scene)
-            # Draw OBJ sliding-window grid when stuck
-            if obj_templates and now - last_real_fsm_change >= FSM_STUCK_TIMEOUT_MODAL * 0.5:
-                _obj_rw = int(OUTPUT_W * 0.25)
-                _obj_rh = int(OUTPUT_H * 0.05)
-                _obj_sx = max(1, _obj_rw // 2)
-                _obj_sy = max(1, _obj_rh // 2)
-                _gy = 0
-                while _gy + _obj_rh <= OUTPUT_H:
-                    _gx = 0
-                    while _gx + _obj_rw <= OUTPUT_W:
-                        cv2.rectangle(display, (_gx, _gy),
-                                      (_gx + _obj_rw, _gy + _obj_rh),
-                                      (0, 255, 255), 1)
-                        _gx += _obj_sx
-                    _gy += _obj_sy
+            draw_obj_windows(display, last_obj_info)
             if toast_text:
                 draw_toast(display, toast_text, now - toast_time)
                 if now - toast_time >= TOAST_DURATION:
