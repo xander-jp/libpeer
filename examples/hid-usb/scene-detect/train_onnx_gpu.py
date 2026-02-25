@@ -132,7 +132,7 @@ def main():
     parser.add_argument("--epochs", type=int, default=300)
     parser.add_argument("--aug", type=int, default=SAMPLES_PER_CLASS,
                         help="target samples per class after augmentation")
-    parser.add_argument("--lr", type=float, default=0.005)
+    parser.add_argument("--lr", type=float, default=0.001)
     parser.add_argument("--batch", type=int, default=64)
     args = parser.parse_args()
 
@@ -178,6 +178,10 @@ def main():
 
     optimizer = optim.Adam(model.parameters(), lr=args.lr)
     criterion = nn.CrossEntropyLoss()
+
+    # Sanity check: accuracy before training (should be ~1/n_classes ≈ 2%)
+    acc0, _ = evaluate(model, device, X_tensor, y)
+    print(f"  Before training acc={acc0:.4f} (expect ~{1.0/n_classes:.4f})")
 
     t0 = time.monotonic()
     for epoch in range(args.epochs):
