@@ -4,7 +4,7 @@
 Usage:
     python3 train_onnx.py [--epochs 300] [--aug 500] [--lr 0.005]
 
-Reads snapshots from ./snapshots/, trains a tiny CNN on Canny edge images,
+Reads snapshots from ./snapshots/, trains a tiny CNN on grayscale images,
 and writes:
     scene_model.onnx   - ONNX inference model
     scene_labels.json  - ordered class labels
@@ -24,18 +24,20 @@ SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapsho
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scene_model.onnx")
 LABELS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scene_labels.json")
 
-INPUT_W = 64
-INPUT_H = 128
-N_FEATURES = INPUT_W * INPUT_H  # 8192 (single-channel Canny edge)
+INPUT_W = 32
+INPUT_H = 64
+INPUT_CH = 3
+N_FEATURES = INPUT_W * INPUT_H * INPUT_CH  # 6144 (RGB)
 
-CONV1_CH = 8
-CONV2_CH = 16
+CONV1_CH = 16
+CONV2_CH = 32
+CONV3_CH = 64
 
 SAMPLES_PER_CLASS = 500  # target augmented samples per class
 
 # Pre-resize resolution for augmentation (reduces augment cost dramatically)
-AUG_W = INPUT_W * 2   # 128
-AUG_H = INPUT_H * 2   # 256
+AUG_W = INPUT_W * 2   # 64
+AUG_H = INPUT_H * 2   # 128
 
 
 # ============================================================
@@ -62,11 +64,9 @@ def load_images(snapshot_dir):
 
 
 def preprocess(img):
-    """Canny on full-res, then resize to flat vector [N_FEATURES]."""
-    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
-    edges = cv2.Canny(gray, 50, 150)
-    resized = cv2.resize(edges, (INPUT_W, INPUT_H))
-    return resized.astype(np.float32).flatten() / 255.0
+    """BGR resize to flat vector [N_FEATURES] in CHW order."""
+    resized = cv2.resize(img, (INPUT_W, INPUT_H))
+    return resized.astype(np.float32).transpose(2, 0, 1).flatten() / 255.0
 
 
 def augment(img, n):
@@ -170,7 +170,7 @@ def generate_unknown_images(real_images, n, h=AUG_H, w=AUG_W):
 
 def build_dataset(scenes, samples_per_class):
     """Build balanced dataset with augmentation + synthetic 'unknown' class."""
-    labels = sorted(scenes.keys())
+    labels = sorted(k for k in scenes.keys() if k != UNKNOWN_LABEL)
 
     # Always append 'unknown' as the last class
     labels.append(UNKNOWN_LABEL)
@@ -275,20 +275,24 @@ def col2im(col, x_shape, kh, kw, stride=1, pad=0):
 
 
 class SimpleCNN:
-    """Tiny CNN: Conv(8) -> ReLU -> Conv(16) -> ReLU -> GlobalAvgPool -> FC"""
+    """Conv(16)->ReLU->Conv(32)->ReLU->Conv(64)->ReLU->GAP->FC"""
 
     def __init__(self, out_dim):
-        # Conv1: 1 -> CONV1_CH, 3x3, pad=1
-        s1 = np.sqrt(2.0 / (1 * 3 * 3))
-        self.conv1_W = (np.random.randn(CONV1_CH, 1, 3, 3) * s1).astype(np.float32)
+        # Conv1: INPUT_CH -> CONV1_CH, 3x3, pad=1
+        s1 = np.sqrt(2.0 / (INPUT_CH * 3 * 3))
+        self.conv1_W = (np.random.randn(CONV1_CH, INPUT_CH, 3, 3) * s1).astype(np.float32)
         self.conv1_b = np.zeros(CONV1_CH, dtype=np.float32)
         # Conv2: CONV1_CH -> CONV2_CH, 3x3, pad=1
         s2 = np.sqrt(2.0 / (CONV1_CH * 3 * 3))
         self.conv2_W = (np.random.randn(CONV2_CH, CONV1_CH, 3, 3) * s2).astype(np.float32)
         self.conv2_b = np.zeros(CONV2_CH, dtype=np.float32)
-        # FC: CONV2_CH -> out_dim
-        s3 = np.sqrt(2.0 / CONV2_CH)
-        self.fc_W = (np.random.randn(CONV2_CH, out_dim) * s3).astype(np.float32)
+        # Conv3: CONV2_CH -> CONV3_CH, 3x3, pad=1
+        s3 = np.sqrt(2.0 / (CONV2_CH * 3 * 3))
+        self.conv3_W = (np.random.randn(CONV3_CH, CONV2_CH, 3, 3) * s3).astype(np.float32)
+        self.conv3_b = np.zeros(CONV3_CH, dtype=np.float32)
+        # FC: CONV3_CH -> out_dim
+        s4 = np.sqrt(2.0 / CONV3_CH)
+        self.fc_W = (np.random.randn(CONV3_CH, out_dim) * s4).astype(np.float32)
         self.fc_b = np.zeros(out_dim, dtype=np.float32)
 
     def _conv_forward(self, x, W, b, stride=1):
@@ -316,23 +320,29 @@ class SimpleCNN:
 
     def forward(self, X_flat):
         N = X_flat.shape[0]
-        x = X_flat.reshape(N, 1, INPUT_H, INPUT_W)
+        x = X_flat.reshape(N, INPUT_CH, INPUT_H, INPUT_W)
 
-        # Conv1 + ReLU (stride=2: 128x64 -> 64x32)
+        # Conv1 + ReLU (stride=2: 64x32 -> 32x16)
         z1, self._col1 = self._conv_forward(x, self.conv1_W, self.conv1_b, stride=2)
         self._x_shape = x.shape
         self._z1 = z1
         a1 = relu(z1)
 
-        # Conv2 + ReLU (stride=2: 64x32 -> 32x16)
+        # Conv2 + ReLU (stride=2: 32x16 -> 16x8)
         z2, self._col2 = self._conv_forward(a1, self.conv2_W, self.conv2_b, stride=2)
         self._a1_shape = a1.shape
         self._z2 = z2
         a2 = relu(z2)
 
-        # GlobalAvgPool -> (N, CONV2_CH)
-        self._a2 = a2
-        pooled = a2.mean(axis=(2, 3))
+        # Conv3 + ReLU (stride=2: 16x8 -> 8x4)
+        z3, self._col3 = self._conv_forward(a2, self.conv3_W, self.conv3_b, stride=2)
+        self._a2_shape = a2.shape
+        self._z3 = z3
+        a3 = relu(z3)
+
+        # GlobalAvgPool -> (N, CONV3_CH)
+        self._a3 = a3
+        pooled = a3.mean(axis=(2, 3))
 
         # FC + Softmax
         self._pooled = pooled
@@ -347,12 +357,17 @@ class SimpleCNN:
         dz_fc = self.out - y_onehot
         dW_fc = self._pooled.T @ dz_fc / N
         db_fc = dz_fc.mean(axis=0)
-        d_pooled = dz_fc @ self.fc_W.T  # (N, CONV2_CH)
+        d_pooled = dz_fc @ self.fc_W.T  # (N, CONV3_CH)
 
         # GlobalAvgPool backward
-        _, C, H, W = self._a2.shape
-        d_a2 = d_pooled[:, :, np.newaxis, np.newaxis] \
+        _, C, H, W = self._a3.shape
+        d_a3 = d_pooled[:, :, np.newaxis, np.newaxis] \
             * np.ones((1, 1, H, W), dtype=np.float32) / (H * W)
+
+        # Conv3 backward (stride=2)
+        d_z3 = d_a3 * relu_deriv(self._z3)
+        d_a2, dW3, db3 = self._conv_backward(
+            d_z3, self._col3, self._a2_shape, self.conv3_W, stride=2)
 
         # Conv2 backward (stride=2)
         d_z2 = d_a2 * relu_deriv(self._z2)
@@ -367,6 +382,8 @@ class SimpleCNN:
         # Update weights
         self.fc_W -= lr * dW_fc
         self.fc_b -= lr * db_fc
+        self.conv3_W -= lr * dW3
+        self.conv3_b -= lr * db3
         self.conv2_W -= lr * dW2
         self.conv2_b -= lr * db2
         self.conv1_W -= lr * dW1
@@ -390,6 +407,7 @@ def train_cnn(X, y, n_classes, epochs, lr, batch_size=64):
 
     n_params = (cnn.conv1_W.size + cnn.conv1_b.size +
                 cnn.conv2_W.size + cnn.conv2_b.size +
+                cnn.conv3_W.size + cnn.conv3_b.size +
                 cnn.fc_W.size + cnn.fc_b.size)
     print(f"  Parameters: {n_params}")
 
@@ -436,13 +454,15 @@ def export_onnx(cnn, labels, path):
     conv1_b = numpy_helper.from_array(cnn.conv1_b, name="conv1_b")
     conv2_W = numpy_helper.from_array(cnn.conv2_W, name="conv2_W")
     conv2_b = numpy_helper.from_array(cnn.conv2_b, name="conv2_b")
+    conv3_W = numpy_helper.from_array(cnn.conv3_W, name="conv3_W")
+    conv3_b = numpy_helper.from_array(cnn.conv3_b, name="conv3_b")
     fc_W = numpy_helper.from_array(cnn.fc_W, name="fc_W")
     fc_b = numpy_helper.from_array(cnn.fc_b, name="fc_b")
 
     shape_4d = numpy_helper.from_array(
-        np.array([1, 1, INPUT_H, INPUT_W], dtype=np.int64), name="shape_4d")
+        np.array([1, INPUT_CH, INPUT_H, INPUT_W], dtype=np.int64), name="shape_4d")
     shape_2d = numpy_helper.from_array(
-        np.array([1, CONV2_CH], dtype=np.int64), name="shape_2d")
+        np.array([1, CONV3_CH], dtype=np.int64), name="shape_2d")
 
     X_in = helper.make_tensor_value_info(
         "input", TensorProto.FLOAT, [1, N_FEATURES])
@@ -450,9 +470,9 @@ def export_onnx(cnn, labels, path):
         "output", TensorProto.FLOAT, [1, n_classes])
 
     nodes = [
-        # Reshape flat edge vector to 4D: [1, 1, H, W]
+        # Reshape flat RGB vector to 4D: [1, 3, H, W]
         helper.make_node("Reshape", ["input", "shape_4d"], ["x_4d"]),
-        # Conv1 + ReLU
+        # Conv1 + ReLU (stride=2)
         helper.make_node("Conv", ["x_4d", "conv1_W", "conv1_b"], ["z1"],
                          kernel_shape=[3, 3], pads=[1, 1, 1, 1],
                          strides=[2, 2]),
@@ -462,8 +482,13 @@ def export_onnx(cnn, labels, path):
                          kernel_shape=[3, 3], pads=[1, 1, 1, 1],
                          strides=[2, 2]),
         helper.make_node("Relu", ["z2"], ["a2"]),
+        # Conv3 + ReLU (stride=2)
+        helper.make_node("Conv", ["a2", "conv3_W", "conv3_b"], ["z3"],
+                         kernel_shape=[3, 3], pads=[1, 1, 1, 1],
+                         strides=[2, 2]),
+        helper.make_node("Relu", ["z3"], ["a3"]),
         # GlobalAveragePool -> Reshape to 2D
-        helper.make_node("GlobalAveragePool", ["a2"], ["pooled_4d"]),
+        helper.make_node("GlobalAveragePool", ["a3"], ["pooled_4d"]),
         helper.make_node("Reshape", ["pooled_4d", "shape_2d"], ["pooled"]),
         # FC + Softmax
         helper.make_node("Gemm", ["pooled", "fc_W", "fc_b"], ["logits"],
@@ -475,7 +500,7 @@ def export_onnx(cnn, labels, path):
         nodes, "scene_classifier",
         [X_in], [Y_out],
         initializer=[conv1_W, conv1_b, conv2_W, conv2_b,
-                      fc_W, fc_b, shape_4d, shape_2d],
+                      conv3_W, conv3_b, fc_W, fc_b, shape_4d, shape_2d],
     )
     model = helper.make_model(
         graph, opset_imports=[helper.make_opsetid("", 13)])
@@ -499,8 +524,8 @@ def main():
     parser.add_argument("--batch", type=int, default=64)
     args = parser.parse_args()
 
-    print(f"Input: {INPUT_W}x{INPUT_H} Canny edge = {N_FEATURES} features")
-    print(f"CNN: Conv({CONV1_CH})->ReLU->Conv({CONV2_CH})->ReLU->GAP->FC")
+    print(f"Input: {INPUT_W}x{INPUT_H}x{INPUT_CH} RGB = {N_FEATURES} features")
+    print(f"CNN: Conv({CONV1_CH})->ReLU->Conv({CONV2_CH})->ReLU->Conv({CONV3_CH})->ReLU->GAP->FC")
     print(f"Epochs: {args.epochs}  LR: {args.lr}  Batch: {args.batch}")
     print()
 
