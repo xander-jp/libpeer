@@ -119,6 +119,7 @@ MODAL_STATES = [
     S_INFORMATION_STRIKER_NAVI,
     S_TUTORIAL_CLEAR,
     S_INFORMATION_GIMIC2,
+    S_CLEAR_OK,
 ]
 
 MODAL_FSM_ACTIONS = {s: s.lower().replace("-", "_") + "_ok" for s in MODAL_STATES}
@@ -163,6 +164,11 @@ _fsm_pending = None   # candidate state awaiting confirmation
 _fsm_pending_count = 0  # consecutive times candidate has been seen
 FSM_CONFIRM_COUNT = 3   # required consecutive hits before transition
 
+# Per-state overrides for confirm count (noisy / easily confused states)
+FSM_CONFIRM_COUNT_OVERRIDE = {
+    S_CONFIRM_RETRY: 10,
+}
+
 
 def fsm_update(state, scores):
     """Evaluate Moore FSM transition based on current scores.
@@ -192,7 +198,8 @@ def fsm_update(state, scores):
         else:
             _fsm_pending = candidate
             _fsm_pending_count = 1
-        if _fsm_pending_count >= FSM_CONFIRM_COUNT:
+        required = FSM_CONFIRM_COUNT_OVERRIDE.get(candidate, FSM_CONFIRM_COUNT)
+        if _fsm_pending_count >= required:
             _fsm_pending = None
             _fsm_pending_count = 0
             return candidate, True

@@ -185,8 +185,7 @@ FSM_TRANSITIONS = {
     S_NORMAL_QUEST_UIJIN:      [S_NORMAL_QUEST_UIJIN_KARYU] + MODAL_STATES,
     S_NORMAL_QUEST_UIJIN_KARYU:[S_DECK_SELECT] + MODAL_STATES,
     S_DECK_SELECT:              [S_WELCOME_IN_PLAY, S_HOME] + MODAL_STATES,
-    S_WELCOME_IN_PLAY:          [S_CLEAR_OK] + MODAL_STATES,
-    S_CLEAR_OK:                 [S_SPECIAL_REWARD, S_REWARD_NEXT, S_HOME] + MODAL_STATES,
+    S_WELCOME_IN_PLAY:          MODAL_STATES,
     S_SPECIAL_REWARD:           [S_REWARD_NEXT, S_HOME] + MODAL_STATES,
     S_REWARD_NEXT:              [S_HOME, S_SPECIAL_REWARD] + MODAL_STATES,
     # --- modals: OK → back to any scene or another modal ---
@@ -434,6 +433,10 @@ def main():
                     last_fsm_change = now
                     last_real_fsm_change = now
                     hid.notify_slack("welcome", prev_fsm_state, fsm_state)
+                    # --- Reset welcome stage on tutorial congratulate ---
+                    if fsm_state == S_TUTORIAL_CONGRATURATE:
+                        _welcome_stage = 0
+                        print(f"  [welcome] reset _welcome_stage=0 (TUTORIAL-CONGRATURATE)")
                     # --- Save to all trackers ---
                     hid.save_full_test_frame(fsm_state, roi_resized)
                     hid.save_subtotal_frame(fsm_state, roi_resized)

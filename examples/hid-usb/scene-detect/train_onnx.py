@@ -24,9 +24,9 @@ SNAPSHOT_DIR = os.path.join(os.path.dirname(os.path.abspath(__file__)), "snapsho
 MODEL_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scene_model.onnx")
 LABELS_PATH = os.path.join(os.path.dirname(os.path.abspath(__file__)), "scene_labels.json")
 
-INPUT_W = 32
-INPUT_H = 64
-N_FEATURES = INPUT_W * INPUT_H  # 2048 (single-channel Canny edge)
+INPUT_W = 64
+INPUT_H = 128
+N_FEATURES = INPUT_W * INPUT_H  # 8192 (single-channel Canny edge)
 
 CONV1_CH = 8
 CONV2_CH = 16
@@ -56,11 +56,11 @@ def load_images(snapshot_dir):
 
 
 def preprocess(img):
-    """Resize, extract Canny edges, normalise to flat vector [N_FEATURES]."""
-    resized = cv2.resize(img, (INPUT_W, INPUT_H))
-    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+    """Canny on full-res, then resize to flat vector [N_FEATURES]."""
+    gray = cv2.cvtColor(img, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 150)
-    return edges.astype(np.float32).flatten() / 255.0
+    resized = cv2.resize(edges, (INPUT_W, INPUT_H))
+    return resized.astype(np.float32).flatten() / 255.0
 
 
 def augment(img, n):

@@ -16,8 +16,8 @@ ONNX_MODEL_PATH = os.path.join(_DIR, "scene_model.onnx")
 ONNX_LABELS_PATH = os.path.join(_DIR, "scene_labels.json")
 
 # ONNX input size (must match train_onnx.py)
-ONNX_INPUT_W = 32
-ONNX_INPUT_H = 64
+ONNX_INPUT_W = 64
+ONNX_INPUT_H = 128
 
 # --- Stage 2: sub-region boost/penalty weights ---
 REGION_BOOST = 0.10    # max positive adjustment per matching region
@@ -48,12 +48,12 @@ def load_onnx_model(model_path, labels_path):
 def onnx_preprocess(frame):
     """Preprocess frame for ONNX inference. Returns [1, N_FEATURES] float32.
 
-    Converts to Canny edge image (single channel) to match train_onnx.py.
+    Canny on full-res frame, then resize to match train_onnx.py.
     """
-    resized = cv2.resize(frame, (ONNX_INPUT_W, ONNX_INPUT_H))
-    gray = cv2.cvtColor(resized, cv2.COLOR_BGR2GRAY)
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
     edges = cv2.Canny(gray, 50, 150)
-    vec = edges.astype(np.float32).flatten() / 255.0
+    resized = cv2.resize(edges, (ONNX_INPUT_W, ONNX_INPUT_H))
+    vec = resized.astype(np.float32).flatten() / 255.0
     return vec.reshape(1, -1)
 
 

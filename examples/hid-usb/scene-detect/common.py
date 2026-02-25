@@ -1139,8 +1139,8 @@ def act_information_gacha_ok(args):
         return
     calibrate(manual_size=(int(args[0]), int(args[1])))
     reset_origin()
-    print("[action] tap OK (0.50, 0.82)")
-    click_pct(0.50, 0.82, repeat=1)
+    print("[action] tap OK")
+    click_pct(0.50, 0.816, repeat=1)
     wait(3.0)
     reset_origin()
     print("[action] tap home (0.12, 0.92)")
