@@ -33,6 +33,10 @@ CONV2_CH = 16
 
 SAMPLES_PER_CLASS = 500  # target augmented samples per class
 
+# Pre-resize resolution for augmentation (reduces augment cost dramatically)
+AUG_W = INPUT_W * 2   # 128
+AUG_H = INPUT_H * 2   # 256
+
 
 # ============================================================
 #  Data loading & augmentation
@@ -51,6 +55,8 @@ def load_images(snapshot_dir):
         img = cv2.imread(path)
         if img is None:
             continue
+        # Pre-resize to cut augmentation cost (~10x smaller pixels)
+        img = cv2.resize(img, (AUG_W, AUG_H))
         scenes.setdefault(name, []).append(img)
     return scenes
 
@@ -108,7 +114,7 @@ def augment(img, n):
 UNKNOWN_LABEL = "unknown"
 
 
-def generate_unknown_images(real_images, n, h=800, w=400):
+def generate_unknown_images(real_images, n, h=AUG_H, w=AUG_W):
     """Generate synthetic 'unknown' images that look nothing like any scene.
 
     Mix of: random noise, uniform colour, gradients, heavy distortion
@@ -285,17 +291,19 @@ class SimpleCNN:
         self.fc_W = (np.random.randn(CONV2_CH, out_dim) * s3).astype(np.float32)
         self.fc_b = np.zeros(out_dim, dtype=np.float32)
 
-    def _conv_forward(self, x, W, b):
+    def _conv_forward(self, x, W, b, stride=1):
         """Conv2d forward (3x3, pad=1). Returns (output, col_cache)."""
         out_ch = W.shape[0]
         N, _, H, W_in = x.shape
-        col = im2col(x, 3, 3, pad=1)
+        out_h = (H + 2 - 3) // stride + 1
+        out_w = (W_in + 2 - 3) // stride + 1
+        col = im2col(x, 3, 3, stride=stride, pad=1)
         col_W = W.reshape(out_ch, -1).T  # (C_in*9, out_ch)
         out_flat = col @ col_W + b
-        out = out_flat.reshape(N, H, W_in, out_ch).transpose(0, 3, 1, 2)
+        out = out_flat.reshape(N, out_h, out_w, out_ch).transpose(0, 3, 1, 2)
         return out, col
 
-    def _conv_backward(self, dout, col, x_shape, W):
+    def _conv_backward(self, dout, col, x_shape, W, stride=1):
         """Conv2d backward. Returns (dx, dW, db)."""
         out_ch = W.shape[0]
         N = dout.shape[0]
@@ -303,21 +311,21 @@ class SimpleCNN:
         dW = (col.T @ dout_flat).T.reshape(W.shape) / N
         db = dout_flat.sum(axis=0) / N
         dcol = dout_flat @ W.reshape(out_ch, -1)
-        dx = col2im(dcol, x_shape, 3, 3, pad=1)
+        dx = col2im(dcol, x_shape, 3, 3, stride=stride, pad=1)
         return dx, dW, db
 
     def forward(self, X_flat):
         N = X_flat.shape[0]
         x = X_flat.reshape(N, 1, INPUT_H, INPUT_W)
 
-        # Conv1 + ReLU
-        z1, self._col1 = self._conv_forward(x, self.conv1_W, self.conv1_b)
+        # Conv1 + ReLU (stride=2: 128x64 -> 64x32)
+        z1, self._col1 = self._conv_forward(x, self.conv1_W, self.conv1_b, stride=2)
         self._x_shape = x.shape
         self._z1 = z1
         a1 = relu(z1)
 
-        # Conv2 + ReLU
-        z2, self._col2 = self._conv_forward(a1, self.conv2_W, self.conv2_b)
+        # Conv2 + ReLU (stride=2: 64x32 -> 32x16)
+        z2, self._col2 = self._conv_forward(a1, self.conv2_W, self.conv2_b, stride=2)
         self._a1_shape = a1.shape
         self._z2 = z2
         a2 = relu(z2)
@@ -346,15 +354,15 @@ class SimpleCNN:
         d_a2 = d_pooled[:, :, np.newaxis, np.newaxis] \
             * np.ones((1, 1, H, W), dtype=np.float32) / (H * W)
 
-        # Conv2 backward
+        # Conv2 backward (stride=2)
         d_z2 = d_a2 * relu_deriv(self._z2)
         d_a1, dW2, db2 = self._conv_backward(
-            d_z2, self._col2, self._a1_shape, self.conv2_W)
+            d_z2, self._col2, self._a1_shape, self.conv2_W, stride=2)
 
-        # Conv1 backward
+        # Conv1 backward (stride=2)
         d_z1 = d_a1 * relu_deriv(self._z1)
         _, dW1, db1 = self._conv_backward(
-            d_z1, self._col1, self._x_shape, self.conv1_W)
+            d_z1, self._col1, self._x_shape, self.conv1_W, stride=2)
 
         # Update weights
         self.fc_W -= lr * dW_fc
@@ -446,11 +454,13 @@ def export_onnx(cnn, labels, path):
         helper.make_node("Reshape", ["input", "shape_4d"], ["x_4d"]),
         # Conv1 + ReLU
         helper.make_node("Conv", ["x_4d", "conv1_W", "conv1_b"], ["z1"],
-                         kernel_shape=[3, 3], pads=[1, 1, 1, 1]),
+                         kernel_shape=[3, 3], pads=[1, 1, 1, 1],
+                         strides=[2, 2]),
         helper.make_node("Relu", ["z1"], ["a1"]),
-        # Conv2 + ReLU
+        # Conv2 + ReLU (stride=2)
         helper.make_node("Conv", ["a1", "conv2_W", "conv2_b"], ["z2"],
-                         kernel_shape=[3, 3], pads=[1, 1, 1, 1]),
+                         kernel_shape=[3, 3], pads=[1, 1, 1, 1],
+                         strides=[2, 2]),
         helper.make_node("Relu", ["z2"], ["a2"]),
         # GlobalAveragePool -> Reshape to 2D
         helper.make_node("GlobalAveragePool", ["a2"], ["pooled_4d"]),
