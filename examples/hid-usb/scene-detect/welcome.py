@@ -373,6 +373,15 @@ def main():
     picam2.start()
     time.sleep(0.5)
 
+    # Manual exposure / gain controls
+    picam2.set_controls({
+        "AeEnable": False,
+        "AwbEnable": False,
+        "ExposureTime": 10000,     # microseconds
+        "AnalogueGain": 1.0,
+    })
+    time.sleep(0.3)  # wait for controls to take effect
+
     print(f"Capture: {CAP_W}x{CAP_H}  ROI: ({ROI_X},{ROI_Y},{ROI_W},{ROI_H})  Output: {OUTPUT_W}x{OUTPUT_H}")
     print("Keys: q=quit  s=save snapshot  m=click at cursor")
 
@@ -423,6 +432,13 @@ def main():
                 scores = onnx_classify(roi_resized, onnx_session, onnx_labels,
                                        SCENE_REGIONS, templates_region)
                 last_detect = now
+                # Log camera exposure metadata
+                try:
+                    meta = picam2.capture_metadata()
+                    print(f"  [CAM] ExposureTime={meta.get('ExposureTime')} "
+                          f"AnalogueGain={meta.get('AnalogueGain')}")
+                except Exception as e:
+                    print(f"  [CAM] metadata error: {e}")
                 # FSM update
                 prev_fsm_state = fsm_state
                 fsm_state, fsm_changed = fsm_update(fsm_state, scores)
